@@ -1,0 +1,353 @@
+---
+description: Project document
+globs: 
+alwaysApply: false
+---
+Project Document: Extensible Code Knowledge Graph
+1. Introduction
+1.1 Purpose
+This document outlines the schema, design, and implementation strategy for creating an extensible Code Knowledge Graph (CKG). The primary goal is to represent a codebase as a graph, capturing its structure, relationships, and dependencies. Initially, the focus will be on Java, but the design will be flexible enough to incorporate other programming languages such as Python, JavaScript, C++, and Go.
+1.2 Background
+Understanding complex codebases is a significant challenge in software development and maintenance. A CKG can provide valuable insights into code structure, dependencies, and potential impact of changes. By representing code entities (like modules, classes, functions) and their relationships (like calls, inheritance, dependencies) as a graph, we can perform powerful queries and analyses.
+1.3 Goals
+Define a core, language-agnostic schema for the CKG.
+Provide specific extensions for Java.
+Outline a strategy for extending the schema to other languages.
+Describe the data ingestion and population process.
+Identify potential use cases and analysis capabilities.
+1.4 Scope
+In Scope:
+Schema definition for core entities and relationships.
+Java-specific schema extensions.
+High-level design for extensibility to Python, JavaScript, C++, Go.
+Conceptual data ingestion pipeline using Tree-sitter based parsers and Memgraph.
+Out of Scope:
+Detailed algorithms for static/dynamic code analysis beyond AST traversal.
+Performance benchmarks of Memgraph against other graph databases.
+2. Core Knowledge Graph Schema (Language Agnostic)
+This core schema defines fundamental entities and relationships common across many programming languages.
+2.1 Core Entities
+These entities represent the basic building blocks of most codebases.
+CodeResource (Abstract)
+Description: A generic representation of a piece of code or a container of code. This serves as a base type for more specific entities.
+Attributes:
+name (String): The identifier of the code resource (e.g., function name, class name, file name).
+qualifiedName (String): A unique, fully qualified name for the resource within the codebase (e.g., com.example.MyClass.myMethod).
+documentation (String, Optional): Extracted comments or documentation associated with the resource.
+language (String, Enum, Optional): The primary programming language of this resource (e.g., "Java", "Python"). Useful when multiple languages are present.
+File (Inherits CodeResource)
+Description: Represents a physical file in the codebase.
+Attributes:
+path (String): The absolute or relative file path.
+size (Integer, Optional): Size of the file in bytes.
+lastModifiedDate (DateTime, Optional): Last modification timestamp.
+checksum (String, Optional): A checksum (e.g., MD5, SHA256) of the file content for change tracking.
+Namespace (or Module or Package) (Inherits CodeResource)
+Description: Represents a logical grouping of code, such as a module in Python, a package in Java, or a namespace in C++.
+Attributes:
+(Inherits name, qualifiedName, documentation from CodeResource)
+Structure (or TypeDefinition) (Inherits CodeResource)
+Description: Represents a user-defined type or data structure, such as a class, struct, interface, or enum.
+Attributes:
+(Inherits name, qualifiedName, documentation from CodeResource)
+accessModifier (String, Enum, Optional): Visibility level (e.g., public, private, protected, internal, fileprivate). Values depend on the language.
+isAbstract (Boolean, Optional): Indicates if the structure is abstract (if applicable to the language).
+isInterface (Boolean, Optional): Indicates if the structure defines an interface (if applicable).
+Callable (or FunctionUnit) (Inherits CodeResource)
+Description: Represents an executable unit of code, such as a function, method, constructor, or lambda expression.
+Attributes:
+(Inherits name, qualifiedName, documentation from CodeResource)
+returnType (String, Optional): The data type of the value returned by the callable. Could also reference another Structure node.
+accessModifier (String, Enum, Optional): Visibility level.
+isStatic (Boolean, Optional): Indicates if the callable is static (if applicable).
+isAbstract (Boolean, Optional): Indicates if the callable is abstract (if applicable).
+cyclomaticComplexity (Integer, Optional): A measure of the code's complexity.
+linesOfCode (Integer, Optional): Number of source lines of code (SLOC) within the callable.
+signature (String, Optional): A textual representation of the callable's signature (name + parameter types).
+Parameter (or Argument) (Inherits CodeResource)
+Description: Represents a parameter of a Callable.
+Attributes:
+(Inherits name, documentation from CodeResource)
+type (String): The data type of the parameter. Could also reference another Structure node.
+defaultValue (String, Optional): Default value if one is defined.
+position (Integer): The ordinal position of the parameter in the callable's signature.
+Variable (Inherits CodeResource)
+Description: Represents a variable declared within a Callable, Structure, or Namespace. This can include local variables, fields, global variables, etc.
+Attributes:
+(Inherits name, qualifiedName, documentation from CodeResource)
+type (String): The data type of the variable. Could also reference another Structure node.
+initialValue (String, Optional): Initial value if defined and simple enough to capture.
+isConstant (Boolean, Optional): Indicates if the variable is a constant.
+accessModifier (String, Enum, Optional): Visibility level (for fields/member variables).
+Annotation (or Decorator) (Inherits CodeResource)
+Description: Represents metadata attached to code elements (e.g., Java annotations, Python decorators).
+Attributes:
+(Inherits name, qualifiedName, documentation from CodeResource)
+parameters (Map<String, String>, Optional): Key-value pairs of annotation parameters.
+Comment
+Description: Represents a code comment not directly part of formal documentation.
+Attributes:
+text (String): The content of the comment.
+type (String, Enum): E.g., LINE, BLOCK, DOC.
+lineNumberStart (Integer): Starting line number.
+lineNumberEnd (Integer): Ending line number.
+2.2 Core Relationships
+These relationships define how the core entities interact.
+DEFINED_IN
+Description: Indicates that a code entity is defined within a specific file.
+From: Namespace, Structure, Callable, Variable, Annotation
+To: File
+Attributes:
+lineNumberStart (Integer, Optional): The line number where the definition begins.
+lineNumberEnd (Integer, Optional): The line number where the definition ends.
+columnNumberStart (Integer, Optional)
+columnNumberEnd (Integer, Optional)
+CONTAINS (or HAS_MEMBER)
+Description: Represents containment or membership.
+From / To (Examples):
+Namespace -> Namespace (nested namespaces/packages)
+Namespace -> Structure
+Namespace -> Callable (global functions)
+File -> Structure
+File -> Callable
+Structure -> Callable (methods)
+Structure -> Variable (fields/attributes)
+Structure -> Structure (inner/nested classes)
+Callable -> Variable (local variables)
+Callable -> Structure (local/anonymous classes)
+CALLS
+Description: Represents a function or method call.
+From: Callable
+To: Callable
+Attributes:
+lineNumber (Integer, Optional): Line number where the call occurs.
+isDynamicDispatch (Boolean, Optional): True if the call resolution might be dynamic (e.g., virtual method call).
+type (String, Enum, Optional): E.g., STATIC, VIRTUAL, INTERFACE, SUPER.
+HAS_PARAMETER
+Description: Links a Callable to its Parameters.
+From: Callable
+To: Parameter
+REFERENCES (or USES_TYPE)
+Description: Indicates that a code entity refers to or uses a type definition.
+From: Callable (e.g., return type, variable type), Parameter (type), Variable (type), Structure (e.g., field type, type of implemented interface)
+To: Structure
+Attributes:
+usageContext (String, Enum, Optional): E.g., RETURN_TYPE, PARAMETER_TYPE, VARIABLE_TYPE, FIELD_TYPE, CAST, INSTANCE_CREATION.
+ACCESSES
+Description: Represents access to a variable (read or write).
+From: Callable
+To: Variable
+Attributes:
+accessType (String, Enum): READ, WRITE, READ_WRITE.
+lineNumber (Integer, Optional): Line number where the access occurs.
+INHERITS_FROM (or EXTENDS)
+Description: Represents class inheritance.
+From: Structure (Subclass)
+To: Structure (Superclass)
+IMPLEMENTS
+Description: Represents a class implementing an interface.
+From: Structure (Class)
+To: Structure (Interface, where Structure.isInterface is true)
+IMPORTS (or USES_NAMESPACE or INCLUDES_FILE)
+Description: Represents a dependency where one code unit imports/includes/uses another, typically at the file or namespace level.
+From: File, Namespace
+To: File, Namespace, Structure (e.g. Java static import of a class member)
+Attributes:
+alias (String, Optional): If the imported entity is aliased.
+ANNOTATED_BY (or HAS_DECORATOR)
+Description: Links a code element to an Annotation or Decorator that applies to it.
+From: Structure, Callable, Parameter, Variable, Namespace, File
+To: Annotation
+THROWS (or RAISES_EXCEPTION)
+Description: Indicates a Callable may throw a specific type of exception.
+From: Callable
+To: Structure (Exception type)
+Attributes:
+isDeclared (Boolean): True if explicitly declared (e.g., Java throws clause).
+CREATES_INSTANCE
+Description: Represents the instantiation of an object.
+From: Callable
+To: Structure (The class being instantiated)
+Attributes:
+lineNumber (Integer, Optional): Line number of instantiation.
+ASSOCIATED_COMMENT
+Description: Links a code entity to a relevant Comment.
+From: CodeResource (any specific entity like Callable, Structure, etc.)
+To: Comment
+3. Language-Specific Extensions
+The core schema provides a foundation. We can extend it with entities and attributes specific to each language.
+3.1 Java Specifics
+Entities:
+Package (Specialization of Namespace)
+Description: Represents a Java package.
+(Inherits attributes from Namespace)
+Class (Specialization of Structure)
+Description: Represents a Java class.
+Attributes (in addition to Structure):
+isFinal (Boolean): If the class is final.
+isEnum (Boolean): If the class is an enum.
+isRecord (Boolean): If the class is a record (Java 14+).
+genericParameters (List, Optional): e.g., <T, E extends Number>.
+Interface (Specialization of Structure)
+Description: Represents a Java interface.
+Attributes (in addition to Structure):
+isFunctionalInterface (Boolean, Optional): If annotated with @FunctionalInterface.
+genericParameters (List, Optional).
+Method (Specialization of Callable)
+Description: Represents a Java method.
+Attributes (in addition to Callable):
+isSynchronized (Boolean): If the method is synchronized.
+isNative (Boolean): If the method is native.
+isDefault (Boolean): If it's a default method in an interface.
+genericParameters (List, Optional).
+varargsParameter (String, Optional): Name of the varargs parameter if present.
+Constructor (Specialization of Callable)
+Description: Represents a Java constructor.
+(Inherits attributes from Callable, returnType is implicitly the class type).
+Field (Specialization of Variable)
+Description: Represents a Java field (member variable).
+Attributes (in addition to Variable):
+isStatic (Boolean): If the field is static.
+isFinal (Boolean): If the field is final.
+isTransient (Boolean): If the field is transient.
+isVolatile (Boolean): If the field is volatile.
+EnumConstant (Specialization of Variable)
+Description: Represents a constant within a Java enum.
+(Inherits attributes from Variable, type is the enum itself).
+JavaAnnotation (Specialization of Annotation)
+Description: Represents a Java annotation.
+Attributes (in addition to Annotation):
+retentionPolicy (String, Enum, Optional): E.g., SOURCE, CLASS, RUNTIME.
+targetElements (List, Enum, Optional): E.g., TYPE, METHOD, FIELD.
+Relationships:
+OVERRIDES
+Description: A method in a subclass overrides a method in a superclass/interface.
+From: Method (Overriding method)
+To: Method (Overridden method)
+Note: This is more specific than a simple CALLS to super.method().
+TYPE_PARAMETER_BOUND
+Description: Relates a generic type parameter to its bounds.
+From: Structure or Callable (that defines the generic parameter)
+To: Structure (the bound type)
+Attributes:
+parameterName (String): e.g., "T".
+boundType (String, Enum): EXTENDS, SUPER.
+4. Extensibility to Other Languages
+The core schema is designed to be a superset of common concepts. Extending to other languages involves:
+Mapping: Map language constructs to core entities/relationships using Tree-sitter grammars.
+Specialization: Create specialized entities/relationships if a language construct has unique properties not covered by the core (similar to Java extensions).
+New Entities/Relationships: Add new ones if a language has entirely novel concepts.
+4.1 Python
+Module: Maps directly to Namespace.
+Class: Maps to Structure. Python's multiple inheritance can be represented by multiple INHERITS_FROM relationships.
+Function/Method: Maps to Callable.
+Decorator: Maps to Annotation. The ANNOTATED_BY relationship applies.
+Variable (global, instance, local): Maps to Variable.
+Parameter: Maps to Parameter. Python's *args and **kwargs would need special handling, perhaps as attributes on Parameter or Callable (e.g., acceptsArbitraryPositionalArgs: Boolean, acceptsArbitraryKeywordArgs: Boolean).
+import statements: Map to IMPORTS relationship.
+Type Hinting: type attributes on Parameter, Variable, Callable (return type) can store type hints.
+Properties: A Python property could be a Callable (getter/setter/deleter methods) grouped under a conceptual Variable node representing the property itself.
+4.2 JavaScript
+Module (ES6): Maps to Namespace.
+Class (ES6): Maps to Structure.
+Function/Method: Maps to Callable. Arrow functions, anonymous functions are all Callable.
+Variable (var, let, const): Maps to Variable. isConstant for const.
+Parameter: Maps to Parameter. Rest parameters (...args) similar to Python's *args.
+Prototypes: Prototypal inheritance can be modeled with a specific relationship like PROTOTYPE_OF or by adapting INHERITS_FROM if the semantics are close enough for the desired analysis.
+require/import: Maps to IMPORTS.
+Callbacks/Promises/Async-Await: CALLS relationships would capture direct invocations. Modeling the asynchronous flow itself (e.g., event loop, promise chains) is more complex and might require specialized relationships or attributes (e.g., isAsync on Callable, AWAITS relationship).
+4.3 C++
+Namespace: Maps directly to Namespace.
+Class/Struct/Union: Map to Structure.
+Function/Method: Maps to Callable.
+Variable (global, member, local, static): Maps to Variable.
+Parameter: Maps to Parameter.
+#include: Maps to IMPORTS (linking to File nodes).
+Templates: Generic programming (templates) would require attributes like genericParameters on Structure and Callable, similar to Java generics. Template specializations could be distinct nodes linked to the primary template.
+Pointers/References: The type attribute on Variable and Parameter should be ableto represent pointer/reference types (e.g., int*, MyClass&). A REFERENCES_MEMORY_AT relationship could model pointer dereferencing if needed for deeper analysis.
+Operator Overloading: Overloaded operators are essentially Callable nodes with special names.
+Friend Functions/Classes: May require a specific relationship like HAS_FRIEND.
+4.4 Go
+Package: Maps to Namespace.
+Struct: Maps to Structure.
+Interface: Maps to Structure with isInterface = true. Go's implicit interface implementation means an IMPLEMENTS relationship would be inferred rather than explicitly declared.
+Function/Method: Maps to Callable. Methods in Go are functions with a receiver argument. The receiver can be a special Parameter.
+Variable: Maps to Variable.
+Parameter: Maps to Parameter.
+import: Maps to IMPORTS.
+Goroutines/Channels: Modeling concurrency primitives like goroutines and channels would require new entities (e.g., Goroutine, Channel) and relationships (e.g., LAUNCHES_GOROUTINE, SENDS_TO_CHANNEL, RECEIVES_FROM_CHANNEL). This is a significant extension.
+5. Data Ingestion and Processing
+Populating the CKG involves several steps:
+Source Code Acquisition: Obtain the codebase (e.g., clone a Git repository).
+Parsing and AST Generation:
+Utilize Tree-sitter as the primary parsing technology. Python wrappers for Tree-sitter will be used to interface with existing Tree-sitter grammars for various languages (Java, Python, JavaScript, C++, Go, etc.).
+For each supported language, a specific Tree-sitter grammar will be employed to generate an Abstract Syntax Tree (AST) or Concrete Syntax Tree (CST) for each source file.
+The Python-based processing pipeline will then traverse these trees.
+Entity Extraction:
+Traverse the Tree-sitter generated syntax trees to identify and extract information for each entity defined in the schema (Classes, Methods, Variables, etc.).
+Populate attributes for each entity.
+Generate unique qualifiedNames.
+Relationship Identification:
+Static Analysis: Re-traverse syntax trees or use symbol tables and type resolution information (where feasible with Tree-sitter output) to identify relationships:
+DEFINED_IN, CONTAINS: Directly from syntax tree structure.
+CALLS: Identify function call expressions. Resolution will rely on naming conventions and import analysis initially, with potential for more advanced resolution techniques later.
+INHERITS_FROM, IMPLEMENTS: From class/interface declarations.
+HAS_PARAMETER, REFERENCES, ACCESSES, THROWS, CREATES_INSTANCE: From type information, variable usage, method signatures, new expressions as identifiable from the syntax tree.
+IMPORTS: From import/include statements.
+ANNOTATED_BY: From annotation/decorator usage.
+Dynamic Analysis (Optional but Recommended for Call Graphs):
+Instrument the code or use profiling tools to capture actual runtime calls, especially for dynamically dispatched calls or calls made via reflection. This can augment the statically derived CALLS relationships.
+Graph Population:
+The extracted entities and relationships will be loaded into Memgraph.
+Python scripts will format the data and use Memgraph's client libraries (e.g., GQLAlchemy or the memgraph Python driver) to execute Cypher queries for creating nodes and relationships.
+Ensure idempotency: Re-processing the same code should update the graph, not create duplicates. qualifiedName and file checksums can help.
+Linking and Resolution:
+Resolve cross-file and cross-module references. For example, if FileA.ClassA calls FileB.ClassB.methodX(), ensure the CALLS edge connects the correct nodes, even if FileB is processed separately. This often requires a multi-pass approach or a global symbol table during processing within the Python ingestion scripts.
+6. Querying and Analysis Use Cases
+The CKG enables various analyses:
+Code Navigation and Understanding:
+"Find all callers of method X." (Query CALLS relationships)
+"Show the inheritance hierarchy for class Y." (Query INHERITS_FROM relationships)
+"What fields does method M access?" (Query ACCESSES relationships)
+"Where is this variable/function defined?" (Query DEFINED_IN relationship)
+Dependency Analysis:
+"Which modules depend on module Z?" (Query IMPORTS or derived dependency relationships)
+"If I change class A, what other classes/methods might be affected?" (Pathfinding queries)
+Impact Analysis:
+"What is the blast radius of deprecating function F?"
+"Which tests might be affected by a change in ClassC?" (If test code is also part of the graph)
+Code Quality and Metrics:
+"Find functions with cyclomatic complexity > N."
+"Identify orphaned code (uncalled functions, unused variables)."
+"Calculate afferent/efferent couplings for modules/classes."
+Refactoring Support:
+"Identify candidates for a new interface based on common method signatures in unrelated classes."
+"Find all instantiations of a class to help with constructor changes."
+Security Analysis:
+"Trace data flow from a user input source (Callable marked as input source) to a sensitive sink (Callable performing DB query)." (Requires taint analysis, potentially adding TAINTS relationships).
+7. Tools and Technologies
+Parsers:
+Primary Parsing Engine: Tree-sitter.
+Implementation Language for Parsers: Python, utilizing Tree-sitter's Python bindings.
+Grammars: Leverage existing Tree-sitter grammars for Java, Python, JavaScript, C++, Go, and other target languages.
+Graph Database:
+Memgraph: An in-memory graph database platform. Queries will be written in Cypher. Data ingestion will be handled via its Python client libraries.
+Visualization:
+Memgraph Lab: Memgraph's integrated visual user interface for graph exploration and query development.
+Gephi, Cytoscape (for more advanced or custom visualizations if needed).
+Custom web-based visualizations using libraries like D3.js, Vis.js, potentially connecting to Memgraph via its API.
+Analysis Platforms:
+Custom analysis scripts will be written in Python, querying Memgraph.
+8. Data Storage and Model
+Property Graph Model: The schema aligns well with the property graph model, which is natively supported by Memgraph. Nodes and relationships can have arbitrary key-value properties.
+Node Labels: Use node labels to represent entity types (e.g., :Class, :Method). An entity can have multiple labels to represent its place in an inheritance hierarchy (e.g., a Java Method node could have labels :Method:Callable:CodeResource). This is standard practice in property graphs and fully supported by Memgraph.
+Relationship Types: Use relationship types as defined in the schema (e.g., :CALLS, :INHERITS_FROM). Memgraph uses these types for defining edges in Cypher.
+9. Future Considerations
+Versioning: How to represent changes to the codebase over time (e.g., linking nodes to Git commits). This could involve snapshotting or delta encoding within Memgraph.
+Build System Integration: Incorporating information from build files (e.g., Maven POMs, Gradle scripts) to understand library dependencies.
+Dynamic Analysis Integration: Deeper integration of runtime information for more accurate call graphs and performance data.
+Cross-Language Calls: Modeling calls between code written in different languages (e.g., JNI calls from Java to C++). This would require a robust qualifiedName scheme that can uniquely identify elements across language boundaries.
+Machine Learning Applications: Using graph embeddings or GNNs on the CKG (Memgraph can integrate with MAGE - Memgraph Advanced Graph Extensions) for tasks like vulnerability prediction, code similarity, automated refactoring suggestions.
+Performance with Large Codebases: Evaluating Memgraph's performance and memory footprint with very large codebases and optimizing data ingestion and query patterns.
+10. Conclusion
+Creating an extensible Code Knowledge Graph using Tree-sitter for parsing and Memgraph for storage is a complex but rewarding endeavor. By starting with a solid core schema and a clear strategy for language-specific extensions, we can build a powerful tool for understanding, analyzing, and improving software systems across various programming languages. The initial focus on Java will provide a concrete implementation, paving the way for broader language support.
