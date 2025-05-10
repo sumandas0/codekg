@@ -6,7 +6,7 @@ import uuid
 import logging
 from collections import defaultdict
 
-from gqlalchemy import Memgraph
+from ..graph.storage_interface import BaseGraphStorage, get_storage_implementation
 
 from .entities import CodeResource
 from .relationships import Relationship
@@ -18,18 +18,25 @@ class CodeKnowledgeGraph:
     Handles entity and relationship management and database interactions.
     """
     
-    def __init__(self, memgraph_host: str = "localhost", memgraph_port: int = 7687):
+    def __init__(self, storage_type: str = "memgraph", storage_config: Optional[Dict[str, Any]] = None):
         """
         Initialize a new Code Knowledge Graph.
         
         Args:
-            memgraph_host: Hostname of the Memgraph instance
-            memgraph_port: Port of the Memgraph instance
+            storage_type: Type of storage backend ('memgraph', 'falkordb', 'neo4j')
+            storage_config: Configuration for the storage backend
         """
         self.entities: Dict[str, CodeResource] = {}
         self.relationships: List[Relationship] = []
-        self.db = Memgraph(host=memgraph_host, port=memgraph_port)
+        
         self.logger = logging.getLogger(__name__)
+        
+        # Initialize storage
+        if storage_config is None:
+            storage_config = {}
+        
+        self.storage = get_storage_implementation(storage_type, **storage_config)
+        self.logger.info(f"Initialized graph with {storage_type} storage backend")
         
     def add_entity(self, entity: CodeResource) -> str:
         """
@@ -100,81 +107,89 @@ class CodeKnowledgeGraph:
         return result
     
     def save_to_db(self) -> None:
-        """Save the entire graph to the Memgraph database."""
-        # Clear existing data (use with caution)
-        self.db.execute("MATCH (n) DETACH DELETE n")
-        
-        # Save entities
-        for entity_id, entity in self.entities.items():
-            # Convert entity to dict and remove special Pydantic fields
-            entity_dict = entity.dict()
-            entity_dict.pop("id", None)  # We'll use this as the node ID
+        """Save the entire graph to the database."""
+        try:
+            # Connect to the storage backend
+            if not self.storage.is_connected:
+                self.storage.connect()
             
-            # Create Cypher query for the entity
-            labels = [entity.__class__.__name__, "CodeResource"]
-            labels_str = ":".join(labels)
+            # Clear existing data (use with caution)
+            self.storage.clear()
             
-            props_str = ", ".join([f"{k}: ${k}" for k in entity_dict.keys()])
-            query = f"CREATE (n:{labels_str} {{id: $id, {props_str}}})"
+            # Create indexes for better performance
+            self.storage.create_indexes()
             
-            # Execute query with parameters
-            self.db.execute(query, {"id": entity_id, **entity_dict})
-        
-        # Save relationships
-        for rel in self.relationships:
-            rel_dict = rel.dict()
-            source_id = rel_dict.pop("source")
-            target_id = rel_dict.pop("target")
-            rel_type = rel_dict.pop("type")
+            # Save entities
+            for entity_id, entity in self.entities.items():
+                # Convert entity to dict and remove special Pydantic fields
+                entity_dict = entity.dict()
+                entity_dict.pop("id", None)  # We'll use this as the node ID
+                
+                # Create entity in database
+                labels = [entity.__class__.__name__, "CodeResource"]
+                self.storage.save_entity(entity_id, labels, entity_dict)
             
-            # Create Cypher query for the relationship
-            query = f"""
-            MATCH (source:CodeResource {{id: $source_id}}), 
-                  (target:CodeResource {{id: $target_id}})
-            CREATE (source)-[r:{rel_type} $properties]->(target)
-            """
-            
-            # Execute query with parameters
-            self.db.execute(query, {
-                "source_id": source_id, 
-                "target_id": target_id,
-                "properties": rel_dict
-            })
+            # Save relationships
+            for rel in self.relationships:
+                rel_dict = rel.dict()
+                source_id = rel_dict.pop("source")
+                target_id = rel_dict.pop("target")
+                rel_type = rel_dict.pop("type")
+                
+                # Create relationship in database
+                self.storage.save_relationship(source_id, target_id, rel_type, rel_dict)
+                
+            self.logger.info("Graph saved to database successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to save graph to database: {e}")
+            raise
     
     def load_from_db(self) -> None:
-        """Load the graph from the Memgraph database."""
-        self.entities.clear()
-        self.relationships.clear()
-        
-        # Load entities
-        query = "MATCH (n:CodeResource) RETURN n"
-        results = self.db.execute_and_fetch(query)
-        
-        for record in results:
-            node = record["n"]
-            # We'd need to map the node properties to the appropriate entity class
-            # This is a simplified version
-            entity_id = node.properties.get("id")
-            if entity_id:
-                self.entities[entity_id] = node.properties
-        
-        # Load relationships
-        query = "MATCH (source:CodeResource)-[r]->(target:CodeResource) RETURN source, r, target"
-        results = self.db.execute_and_fetch(query)
-        
-        for record in results:
-            source_id = record["source"].properties.get("id")
-            target_id = record["target"].properties.get("id")
-            rel = record["r"]
+        """Load the graph from the database."""
+        try:
+            # Connect to the storage backend
+            if not self.storage.is_connected:
+                self.storage.connect()
             
-            if source_id and target_id:
-                relationship = Relationship(
-                    source=source_id,
-                    target=target_id,
-                    type=rel.type,
-                    properties=rel.properties
-                )
-                self.relationships.append(relationship)
+            self.entities.clear()
+            self.relationships.clear()
+            
+            # Load entities
+            query = "MATCH (n:CodeResource) RETURN n"
+            results = self.storage.execute_query(query)
+            
+            for record in results:
+                node = record["n"]
+                # We'd need to map the node properties to the appropriate entity class
+                # This is a simplified version
+                entity_id = node.properties.get("id")
+                if entity_id:
+                    self.entities[entity_id] = node.properties
+            
+            # Load relationships
+            query = "MATCH (source:CodeResource)-[r]->(target:CodeResource) RETURN source.id as source_id, r, target.id as target_id"
+            results = self.storage.execute_query(query)
+            
+            for record in results:
+                source_id = record["source_id"]
+                target_id = record["target_id"]
+                rel = record["r"]
+                
+                if source_id and target_id:
+                    relationship = Relationship(
+                        source=source_id,
+                        target=target_id,
+                        type=rel.type,
+                        **rel.properties
+                    )
+                    self.relationships.append(relationship)
+                
+            self.logger.info("Graph loaded from database successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to load graph from database: {e}")
+            raise
     
     def query(self, cypher_query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
@@ -187,14 +202,24 @@ class CodeKnowledgeGraph:
         Returns:
             List of results
         """
+        if not self.storage.is_connected:
+            self.storage.connect()
+            
         if params is None:
             params = {}
             
-        results = self.db.execute_and_fetch(cypher_query, params)
-        return [dict(record) for record in results]
+        return self.storage.execute_query(cypher_query, params)
     
-    def get_statistics(self) -> Dict[str, int]:
+    def get_statistics(self) -> Dict[str, Any]:
         """Get statistics about the graph."""
+        # If connected to database, get stats from there
+        if self.storage.is_connected:
+            try:
+                return self.storage.get_statistics()
+            except Exception as e:
+                self.logger.warning(f"Failed to get statistics from database: {e}. Using in-memory stats.")
+        
+        # Otherwise, use in-memory stats
         entity_counts = defaultdict(int)
         for entity in self.entities.values():
             entity_type = entity.__class__.__name__
@@ -210,4 +235,28 @@ class CodeKnowledgeGraph:
             "total_relationships": len(self.relationships),
             "entity_counts": dict(entity_counts),
             "relationship_counts": dict(relationship_counts)
-        } 
+        }
+        
+    def export_to_csv(self, export_dir: str) -> None:
+        """
+        Export the graph to CSV files.
+        
+        Args:
+            export_dir: Directory to export CSV files to
+        """
+        if not self.storage.is_connected:
+            self.storage.connect()
+            
+        self.storage.export_to_csv(export_dir)
+        
+    def import_from_csv(self, import_dir: str) -> None:
+        """
+        Import the graph from CSV files.
+        
+        Args:
+            import_dir: Directory to import CSV files from
+        """
+        if not self.storage.is_connected:
+            self.storage.connect()
+            
+        self.storage.import_from_csv(import_dir) 

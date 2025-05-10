@@ -6,7 +6,6 @@ import logging
 from collections import defaultdict
 
 from codekg.core import CodeKnowledgeGraph
-from codekg.graph import MemgraphClient
 
 
 class CodeMetrics:
@@ -14,21 +13,15 @@ class CodeMetrics:
     Analyzer for calculating code metrics from the knowledge graph.
     """
     
-    def __init__(self, graph: Optional[CodeKnowledgeGraph] = None, 
-                client: Optional[MemgraphClient] = None):
+    def __init__(self, graph: CodeKnowledgeGraph):
         """
         Initialize the code metrics analyzer.
         
         Args:
-            graph: Optional in-memory graph to analyze
-            client: Optional MemgraphClient for direct database queries
+            graph: The code knowledge graph to analyze
         """
         self.graph = graph
-        self.client = client
         self.logger = logging.getLogger(__name__)
-        
-        if not graph and not client:
-            raise ValueError("Either graph or client must be provided")
     
     def get_complexity_metrics(self) -> Dict[str, Any]:
         """
@@ -37,7 +30,7 @@ class CodeMetrics:
         Returns:
             Dictionary with various complexity metrics
         """
-        if self.client:
+        if self.graph.storage and self.graph.storage.is_connected:
             return self._get_complexity_metrics_from_db()
         return self._get_complexity_metrics_from_graph()
     
@@ -55,7 +48,7 @@ class CodeMetrics:
             count(c) AS total_callables
         """
         
-        complexity_results = self.client.execute_query(avg_complexity_query)
+        complexity_results = self.graph.query(avg_complexity_query)
         if complexity_results:
             metrics["avg_cyclomatic_complexity"] = complexity_results[0]["avg_complexity"]
             metrics["max_cyclomatic_complexity"] = complexity_results[0]["max_complexity"]
@@ -71,7 +64,7 @@ class CodeMetrics:
         LIMIT 10
         """
         
-        methods_results = self.client.execute_query(methods_per_class_query)
+        methods_results = self.graph.query(methods_per_class_query)
         metrics["classes_by_method_count"] = methods_results
         
         # Calculate average methods per class
@@ -82,7 +75,7 @@ class CodeMetrics:
         RETURN avg(method_count) AS avg_methods_per_class
         """
         
-        avg_methods_results = self.client.execute_query(avg_methods_query)
+        avg_methods_results = self.graph.query(avg_methods_query)
         if avg_methods_results:
             metrics["avg_methods_per_class"] = avg_methods_results[0]["avg_methods_per_class"]
         
@@ -141,7 +134,7 @@ class CodeMetrics:
         Returns:
             Dictionary with various dependency metrics
         """
-        if self.client:
+        if self.graph.storage and self.graph.storage.is_connected:
             return self._get_dependency_metrics_from_db()
         return self._get_dependency_metrics_from_graph()
     
@@ -159,7 +152,7 @@ class CodeMetrics:
         LIMIT 10
         """
         
-        most_depended_results = self.client.execute_query(most_depended_query)
+        most_depended_results = self.graph.query(most_depended_query)
         metrics["most_referenced_classes"] = most_depended_results
         
         # Classes with most outgoing dependencies
@@ -173,7 +166,7 @@ class CodeMetrics:
         LIMIT 10
         """
         
-        most_dependencies_results = self.client.execute_query(most_dependencies_query)
+        most_dependencies_results = self.graph.query(most_dependencies_query)
         metrics["classes_with_most_dependencies"] = most_dependencies_results
         
         # Circular dependencies
@@ -190,7 +183,7 @@ class CodeMetrics:
         LIMIT 10
         """
         
-        circular_deps_results = self.client.execute_query(circular_deps_query)
+        circular_deps_results = self.graph.query(circular_deps_query)
         metrics["circular_dependencies"] = circular_deps_results
         
         return metrics
@@ -208,7 +201,7 @@ class CodeMetrics:
         Returns:
             Dictionary with code organization metrics
         """
-        if self.client:
+        if self.graph.storage and self.graph.storage.is_connected:
             return self._get_code_organization_metrics_from_db()
         return self._get_code_organization_metrics_from_graph()
     
@@ -227,7 +220,7 @@ class CodeMetrics:
         LIMIT 10
         """
         
-        package_results = self.client.execute_query(package_metrics_query)
+        package_results = self.graph.query(package_metrics_query)
         metrics["largest_packages"] = package_results
         
         # Inheritance depth
@@ -244,13 +237,12 @@ class CodeMetrics:
         LIMIT 10
         """
         
-        inheritance_results = self.client.execute_query(inheritance_depth_query)
+        inheritance_results = self.graph.query(inheritance_depth_query)
         metrics["deepest_inheritance_chains"] = inheritance_results
         
         return metrics
     
     def _get_code_organization_metrics_from_graph(self) -> Dict[str, Any]:
         """Calculate code organization metrics from the in-memory graph."""
-        # Implementation would analyze the in-memory entities and relationships
-        # to calculate package metrics and inheritance depth
+        # Implementation would analyze the in-memory graph structure
         return {"note": "In-memory implementation not yet available"} 

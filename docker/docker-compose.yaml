@@ -17,3 +17,12 @@ services:
     environment:
       - QUICK_CONNECT_MG_HOST=memgraph
       - QUICK_CONNECT_MG_PORT=7687
+
+  kuzudb-explorer:
+    image: kuzudb/explorer:latest
+    container_name: kuzudb-explorer
+    ports:
+      - "8000:8000"
+    volumes:
+      - /Users/suman/suman/projects/codekg/kuzudb_data:/database
+    restart: unless-stopped

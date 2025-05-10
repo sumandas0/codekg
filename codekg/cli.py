@@ -14,7 +14,6 @@ from rich.logging import RichHandler
 from codekg.core import CodeKnowledgeGraph
 from codekg.parsers import JavaParser, PythonParser
 from codekg.graph import MemgraphClient
-from codekg.analysis import CodeMetrics
 
 
 # Set up logging
@@ -38,14 +37,58 @@ def cli():
 @cli.command()
 @click.argument('source_path', type=click.Path(exists=True))
 @click.option('--language', '-l', default='java', help='Source code language (java, python)')
-@click.option('--memgraph-host', default='localhost', help='Memgraph server host')
-@click.option('--memgraph-port', default=7687, type=int, help='Memgraph server port')
+@click.option('--db-type', default='memgraph', type=click.Choice(['memgraph', 'falkordb', 'neo4j', 'kuzudb']), 
+              help='Graph database type')
+@click.option('--db-host', default='localhost', help='Database server host')
+@click.option('--db-port', default=None, type=int, 
+              help='Database server port (default: memgraph=7687, falkordb=6379, neo4j=7687)')
+@click.option('--db-user', default=None, help='Database username')
+@click.option('--db-pass', default=None, help='Database password')
+@click.option('--db-name', default=None, help='Database name (for Neo4j)')
+@click.option('--db-path', default=None, help='Database path (for KuzuDB on-disk mode)')
+@click.option('--db-in-memory', is_flag=True, help='Use in-memory mode (for KuzuDB)')
 @click.option('--db-save/--no-db-save', default=True, help='Save to database after parsing')
-def parse(source_path, language, memgraph_host, memgraph_port, db_save):
+def parse(source_path, language, db_type, db_host, db_port, db_user, db_pass, db_name, db_path, db_in_memory, db_save):
     """Parse source code and build a knowledge graph."""
     source_path = os.path.abspath(source_path)
     
-    graph = CodeKnowledgeGraph(memgraph_host=memgraph_host, memgraph_port=memgraph_port)
+    # Configure storage based on selected database type
+    storage_config = {}
+    
+    # Handle different database types
+    if db_type in ["memgraph", "falkordb", "neo4j"]:
+        storage_config["host"] = db_host
+        
+        # Set default ports based on database type if not provided
+        if db_port is None:
+            if db_type == "memgraph":
+                db_port = 7687
+            elif db_type == "falkordb":
+                db_port = 6379
+            elif db_type == "neo4j":
+                db_port = 7687
+        
+        storage_config["port"] = db_port
+        
+        # Add authentication if provided
+        if db_user is not None:
+            storage_config["username"] = db_user
+        if db_pass is not None:
+            storage_config["password"] = db_pass
+        
+        # Add database name for Neo4j
+        if db_type == "neo4j" and db_name is not None:
+            storage_config["database"] = db_name
+    
+    # Handle KuzuDB specific configuration
+    elif db_type == "kuzudb":
+        if db_path:
+            storage_config["db_path"] = db_path
+        if db_in_memory:
+            storage_config["in_memory"] = True
+
+    # Initialize the graph with the configured storage
+    graph = CodeKnowledgeGraph(storage_type=db_type, storage_config=storage_config)
     
     with console.status(f"Parsing {language} code from {source_path}...", spinner="dots"):
         if language.lower() == 'java':
@@ -85,7 +128,7 @@ def parse(source_path, language, memgraph_host, memgraph_port, db_save):
     console.print(rel_table)
     
     if db_save:
-        with console.status("Saving to Memgraph database...", spinner="dots"):
+        with console.status(f"Saving to {db_type} database...", spinner="dots"):
             graph.save_to_db()
         console.print("[green]Knowledge graph saved to database successfully.[/green]")
     
@@ -93,14 +136,61 @@ def parse(source_path, language, memgraph_host, memgraph_port, db_save):
 
 
 @cli.command()
-@click.option('--memgraph-host', default='localhost', help='Memgraph server host')
-@click.option('--memgraph-port', default=7687, type=int, help='Memgraph server port')
+@click.option('--db-type', default='memgraph', type=click.Choice(['memgraph', 'falkordb', 'neo4j', 'kuzudb']), 
+              help='Graph database type')
+@click.option('--db-host', default='localhost', help='Database server host')
+@click.option('--db-port', default=None, type=int, 
+              help='Database server port (default: memgraph=7687, falkordb=6379, neo4j=7687)')
+@click.option('--db-user', default=None, help='Database username')
+@click.option('--db-pass', default=None, help='Database password')
+@click.option('--db-name', default=None, help='Database name (for Neo4j)')
+@click.option('--db-path', default=None, help='Database path (for KuzuDB on-disk mode)')
+@click.option('--db-in-memory', is_flag=True, help='Use in-memory mode (for KuzuDB)')
 @click.option('--export-dir', type=click.Path(), help='Export metrics to JSON file')
-def analyze(memgraph_host, memgraph_port, export_dir):
+def analyze(db_type, db_host, db_port, db_user, db_pass, db_name, db_path, db_in_memory, export_dir):
     """Analyze the code knowledge graph and show metrics."""
     try:
-        client = MemgraphClient(host=memgraph_host, port=memgraph_port)
-        metrics = CodeMetrics(client=client)
+        # Configure storage based on selected database type
+        storage_config = {}
+        
+        # Handle different database types
+        if db_type in ["memgraph", "falkordb", "neo4j"]:
+            storage_config["host"] = db_host
+            
+            # Set default ports based on database type if not provided
+            if db_port is None:
+                if db_type == "memgraph":
+                    db_port = 7687
+                elif db_type == "falkordb":
+                    db_port = 6379
+                elif db_type == "neo4j":
+                    db_port = 7687
+            
+            storage_config["port"] = db_port
+            
+            # Add authentication if provided
+            if db_user is not None:
+                storage_config["username"] = db_user
+            if db_pass is not None:
+                storage_config["password"] = db_pass
+            
+            # Add database name for Neo4j
+            if db_type == "neo4j" and db_name is not None:
+                storage_config["database"] = db_name
+        
+        # Handle KuzuDB specific configuration
+        elif db_type == "kuzudb":
+            if db_path:
+                storage_config["db_path"] = db_path
+            if db_in_memory:
+                storage_config["in_memory"] = True
+
+        # Initialize the graph with the configured storage
+        graph = CodeKnowledgeGraph(storage_type=db_type, storage_config=storage_config)
+
+        # Import required code metrics class in this function to avoid circular import
+        from codekg.analysis import CodeMetrics
+        metrics = CodeMetrics(graph=graph)
         
         with console.status("Calculating complexity metrics...", spinner="dots"):
             complexity_metrics = metrics.get_complexity_metrics()
@@ -161,16 +251,60 @@ def analyze(memgraph_host, memgraph_port, export_dir):
 
 @cli.command()
 @click.argument('query', type=str)
-@click.option('--memgraph-host', default='localhost', help='Memgraph server host')
-@click.option('--memgraph-port', default=7687, type=int, help='Memgraph server port')
+@click.option('--db-type', default='memgraph', type=click.Choice(['memgraph', 'falkordb', 'neo4j', 'kuzudb']), 
+              help='Graph database type')
+@click.option('--db-host', default='localhost', help='Database server host')
+@click.option('--db-port', default=None, type=int, 
+              help='Database server port (default: memgraph=7687, falkordb=6379, neo4j=7687)')
+@click.option('--db-user', default=None, help='Database username')
+@click.option('--db-pass', default=None, help='Database password')
+@click.option('--db-name', default=None, help='Database name (for Neo4j)')
+@click.option('--db-path', default=None, help='Database path (for KuzuDB on-disk mode)')
+@click.option('--db-in-memory', is_flag=True, help='Use in-memory mode (for KuzuDB)')
 @click.option('--output', '-o', type=click.Path(), help='Output results to JSON file')
-def query(query, memgraph_host, memgraph_port, output):
+def query(query, db_type, db_host, db_port, db_user, db_pass, db_name, db_path, db_in_memory, output):
     """Run a Cypher query against the knowledge graph database."""
     try:
-        client = MemgraphClient(host=memgraph_host, port=memgraph_port)
+        # Configure storage based on selected database type
+        storage_config = {}
+        
+        # Handle different database types
+        if db_type in ["memgraph", "falkordb", "neo4j"]:
+            storage_config["host"] = db_host
+            
+            # Set default ports based on database type if not provided
+            if db_port is None:
+                if db_type == "memgraph":
+                    db_port = 7687
+                elif db_type == "falkordb":
+                    db_port = 6379
+                elif db_type == "neo4j":
+                    db_port = 7687
+            
+            storage_config["port"] = db_port
+            
+            # Add authentication if provided
+            if db_user is not None:
+                storage_config["username"] = db_user
+            if db_pass is not None:
+                storage_config["password"] = db_pass
+            
+            # Add database name for Neo4j
+            if db_type == "neo4j" and db_name is not None:
+                storage_config["database"] = db_name
+        
+        # Handle KuzuDB specific configuration
+        elif db_type == "kuzudb":
+            if db_path:
+                storage_config["db_path"] = db_path
+            if db_in_memory:
+                storage_config["in_memory"] = True
+
+        # Initialize the graph with the configured storage
+        graph = CodeKnowledgeGraph(storage_type=db_type, storage_config=storage_config)
         
         with console.status(f"Executing query...", spinner="dots"):
-            results = client.execute_query(query)
+            results = graph.query(query)
         
         if not results:
             console.print("[yellow]Query returned no results.[/yellow]")
@@ -205,6 +339,132 @@ def query(query, memgraph_host, memgraph_port, output):
     
     except Exception as e:
         console.print(f"[red]Error executing query: {e}[/red]")
+
+
+@cli.command()
+@click.option('--db-type', default='memgraph', type=click.Choice(['memgraph', 'falkordb', 'neo4j', 'kuzudb']), 
+              help='Graph database type')
+@click.option('--db-host', default='localhost', help='Database server host')
+@click.option('--db-port', default=None, type=int, 
+              help='Database server port (default: memgraph=7687, falkordb=6379, neo4j=7687)')
+@click.option('--db-user', default=None, help='Database username')
+@click.option('--db-pass', default=None, help='Database password')
+@click.option('--db-name', default=None, help='Database name (for Neo4j)')
+@click.option('--db-path', default=None, help='Database path (for KuzuDB on-disk mode)')
+@click.option('--db-in-memory', is_flag=True, help='Use in-memory mode (for KuzuDB)')
+@click.option('--export-dir', type=click.Path(exists=True), required=True, 
+              help='Directory to export graph data to')
+def export(db_type, db_host, db_port, db_user, db_pass, db_name, db_path, db_in_memory, export_dir):
+    """Export the knowledge graph to CSV files."""
+    try:
+        # Configure storage based on selected database type
+        storage_config = {}
+        
+        # Handle different database types
+        if db_type in ["memgraph", "falkordb", "neo4j"]:
+            storage_config["host"] = db_host
+            
+            # Set default ports based on database type if not provided
+            if db_port is None:
+                if db_type == "memgraph":
+                    db_port = 7687
+                elif db_type == "falkordb":
+                    db_port = 6379
+                elif db_type == "neo4j":
+                    db_port = 7687
+            
+            storage_config["port"] = db_port
+            
+            # Add authentication if provided
+            if db_user is not None:
+                storage_config["username"] = db_user
+            if db_pass is not None:
+                storage_config["password"] = db_pass
+            
+            # Add database name for Neo4j
+            if db_type == "neo4j" and db_name is not None:
+                storage_config["database"] = db_name
+        
+        # Handle KuzuDB specific configuration
+        elif db_type == "kuzudb":
+            if db_path:
+                storage_config["db_path"] = db_path
+            if db_in_memory:
+                storage_config["in_memory"] = True
+
+        # Initialize the graph with the configured storage
+        graph = CodeKnowledgeGraph(storage_type=db_type, storage_config=storage_config)
+        
+        with console.status(f"Exporting graph from {db_type} to {export_dir}...", spinner="dots"):
+            graph.export_to_csv(export_dir)
+        
+        console.print(f"[green]Graph data exported to {export_dir} successfully.[/green]")
+    
+    except Exception as e:
+        console.print(f"[red]Error exporting graph: {e}[/red]")
+
+
+@cli.command()
+@click.option('--db-type', default='memgraph', type=click.Choice(['memgraph', 'falkordb', 'neo4j', 'kuzudb']), 
+              help='Graph database type')
+@click.option('--db-host', default='localhost', help='Database server host')
+@click.option('--db-port', default=None, type=int, 
+              help='Database server port (default: memgraph=7687, falkordb=6379, neo4j=7687)')
+@click.option('--db-user', default=None, help='Database username')
+@click.option('--db-pass', default=None, help='Database password')
+@click.option('--db-name', default=None, help='Database name (for Neo4j)')
+@click.option('--db-path', default=None, help='Database path (for KuzuDB on-disk mode)')
+@click.option('--db-in-memory', is_flag=True, help='Use in-memory mode (for KuzuDB)')
+@click.option('--import-dir', type=click.Path(exists=True), required=True, 
+              help='Directory to import graph data from')
+def import_data(db_type, db_host, db_port, db_user, db_pass, db_name, db_path, db_in_memory, import_dir):
+    """Import the knowledge graph from CSV files."""
+    try:
+        # Configure storage based on selected database type
+        storage_config = {}
+        
+        # Handle different database types
+        if db_type in ["memgraph", "falkordb", "neo4j"]:
+            storage_config["host"] = db_host
+            
+            # Set default ports based on database type if not provided
+            if db_port is None:
+                if db_type == "memgraph":
+                    db_port = 7687
+                elif db_type == "falkordb":
+                    db_port = 6379
+                elif db_type == "neo4j":
+                    db_port = 7687
+            
+            storage_config["port"] = db_port
+            
+            # Add authentication if provided
+            if db_user is not None:
+                storage_config["username"] = db_user
+            if db_pass is not None:
+                storage_config["password"] = db_pass
+            
+            # Add database name for Neo4j
+            if db_type == "neo4j" and db_name is not None:
+                storage_config["database"] = db_name
+        
+        # Handle KuzuDB specific configuration
+        elif db_type == "kuzudb":
+            if db_path:
+                storage_config["db_path"] = db_path
+            if db_in_memory:
+                storage_config["in_memory"] = True
+
+        # Initialize the graph with the configured storage
+        graph = CodeKnowledgeGraph(storage_type=db_type, storage_config=storage_config)
+        
+        with console.status(f"Importing graph to {db_type} from {import_dir}...", spinner="dots"):
+            graph.import_from_csv(import_dir)
+        
+        console.print(f"[green]Graph data imported from {import_dir} successfully.[/green]")
+    
+    except Exception as e:
+        console.print(f"[red]Error importing graph: {e}[/red]")
 
 
 if __name__ == '__main__':
