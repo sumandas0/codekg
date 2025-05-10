@@ -15,14 +15,16 @@ CodeKG allows you to:
 - `codekg/`: Main package
   - `core/`: Core entities and relationships
   - `parsers/`: Language-specific parsers using Tree-sitter
-  - `graph/`: Graph database integration with Memgraph
+  - `graph/`: Graph database integration with Memgraph and KuzuDB
   - `analysis/`: Analysis modules and utilities
   - `utils/`: Common utilities
+- `docker/`: Docker Compose configurations for graph databases
 
 ## Requirements
 
 - Python 3.8+
-- Memgraph DB
+- Graph database (Memgraph or KuzuDB)
+- Docker (optional, for running databases)
 - Tree-sitter and language grammars (automatically installed via requirements.txt)
 
 ## Installation
@@ -30,6 +32,23 @@ CodeKG allows you to:
 ```bash
 pip install -r requirements.txt
 ```
+
+## Docker-based Graph Databases
+
+CodeKG supports multiple graph database backends. You can easily run them using Docker:
+
+```bash
+# Start Memgraph and its web UI
+docker-compose -f docker/docker-compose.yaml up memgraph lab
+
+# Start KuzuDB Explorer 
+docker-compose -f docker/docker-compose.yaml up kuzudb-explorer
+
+# Or start all services
+docker-compose -f docker/docker-compose.yaml up
+```
+
+See `docker/README.md` for detailed documentation on the Docker setup.
 
 ## Usage
 
