@@ -81,14 +81,12 @@ class KuzuDBStorage(BaseGraphStorage):
             self.connect()
         
         try:
-            # Simply try to match and delete all nodes
             try:
                 self.conn.execute("MATCH (n) DETACH DELETE n")
                 self.logger.info("Database cleared with MATCH (n) DETACH DELETE n")
                 return
             except Exception as e:
                 self.logger.error(f"Standard clear failed: {e}")
-                # Try alternative approaches
                 
             # Try separate queries
             try:
@@ -121,8 +119,18 @@ class KuzuDBStorage(BaseGraphStorage):
             try:
                 self.conn.execute("""
                 CREATE NODE TABLE CodeResource(
-                    id STRING, 
+                    id STRING,
+                    name STRING,
+                    language STRING,
                     qualified_name STRING,
+                    description STRING,
+                    size INT,
+                    access_modifier STRING,
+                    is_abstract BOOLEAN,
+                    is_interface BOOLEAN,
+                    is_static BOOLEAN,
+                    is_final BOOLEAN,
+                    is_constructor BOOLEAN,
                     PRIMARY KEY (id)
                 )
                 """)
@@ -139,12 +147,17 @@ class KuzuDBStorage(BaseGraphStorage):
                 CREATE NODE TABLE File(
                     id STRING, 
                     path STRING,
+                    name STRING,
+                    language STRING,
+                    qualified_name STRING,
                     PRIMARY KEY (id)
                 )
                 """,
                 """
                 CREATE NODE TABLE Namespace(
                     id STRING, 
+                    name STRING,
+                    language STRING,
                     qualified_name STRING,
                     PRIMARY KEY (id)
                 )
@@ -152,42 +165,85 @@ class KuzuDBStorage(BaseGraphStorage):
                 """
                 CREATE NODE TABLE Structure(
                     id STRING, 
+                    name STRING,
+                    language STRING,
                     qualified_name STRING,
+                    access_modifier STRING,
+                    is_abstract BOOLEAN,
+                    is_interface BOOLEAN,
+                    is_static BOOLEAN,
+                    is_final BOOLEAN,
+                    is_constructor BOOLEAN,
+                    
                     PRIMARY KEY (id)
                 )
                 """,
                 """
                 CREATE NODE TABLE Callable(
                     id STRING, 
+                    name STRING,
                     qualified_name STRING,
+                    documentation STRING,
+                    language STRING,
+                    return_type STRING,
+                    access_modifier STRING,
+                    is_static BOOLEAN,
+                    is_abstract BOOLEAN,
+                    is_final BOOLEAN,
+                    is_constructor BOOLEAN,
+                    cyclomatic_complexity INT,
+                    lines_of_code INT,
+                    signature STRING,
                     PRIMARY KEY (id)
                 )
                 """,
                 """
                 CREATE NODE TABLE Variable(
                     id STRING, 
+                    name STRING,
+                    language STRING,
                     qualified_name STRING,
+                    documentation STRING,
+                    type STRING,
+                    position INT,
+                    initial_value STRING,
+                    is_constant BOOLEAN,
+                    access_modifier STRING,
+                    default_value STRING,
                     PRIMARY KEY (id)
                 )
                 """,
                 """
                 CREATE NODE TABLE Parameter(
                     id STRING, 
+                    name STRING,
+                    language STRING,
                     qualified_name STRING,
+                    access_modifier STRING,
+                    type STRING,
+                    position INT,
+                    is_optional BOOLEAN,
+                    default_value STRING,
                     PRIMARY KEY (id)
                 )
                 """,
                 """
                 CREATE NODE TABLE Annotation(
                     id STRING, 
+                    name STRING,
+                    language STRING,
                     qualified_name STRING,
+                    access_modifier STRING,
                     PRIMARY KEY (id)
                 )
                 """,
                 """
                 CREATE NODE TABLE Comment(
                     id STRING, 
+                    name STRING,
+                    language STRING,
                     qualified_name STRING,
+                    access_modifier STRING,
                     PRIMARY KEY (id)
                 )
                 """
@@ -267,7 +323,6 @@ class KuzuDBStorage(BaseGraphStorage):
             raise
     
     def save_entity(self, entity_id: str, labels: List[str], properties: Dict[str, Any]) -> None:
-        """Save an entity to the database."""
         if not self.is_connected:
             self.connect()
         
@@ -283,69 +338,52 @@ class KuzuDBStorage(BaseGraphStorage):
                 self.logger.warning(f"Unknown node type {primary_label}, using CodeResource instead")
                 primary_label = "CodeResource"
             
-            # KuzuDB requires primary key ID to be specified
-            # Try with the most basic Cypher CREATE with id property
-            try:
-                # Use string literal for ID to avoid parameter binding issues
-                sanitized_id = entity_id.replace("'", "''")  # Escape single quotes
-                query = f"CREATE (:{primary_label} {{id: '{sanitized_id}'}})"
-                self.conn.execute(query)
-                return
-            except Exception as e:
-                self.logger.error(f"Basic CREATE with ID failed for {primary_label}: {e}")
-                # Continue to next approach
+            # Use a strict whitelist approach
+            # Only include properties that we know are safe and necessary
+            safe_props = {}
             
-            # Try with variable to see if that helps
-            try:
-                sanitized_id = entity_id.replace("'", "''")
-                query = f"CREATE (n:{primary_label} {{id: '{sanitized_id}'}})"
-                self.conn.execute(query)
-                return
-            except Exception as e:
-                self.logger.error(f"Variable CREATE with ID failed for {primary_label}: {e}")
-                # Continue to next approach
+            # Always include ID (required)
+            sanitized_id = str(entity_id).replace("'", "''")
+            safe_props["id"] = f"'{sanitized_id}'"
+            
+            # List of whitelisted properties by node type
+            if primary_label == "File":
+                whitelist = ["path", "name", "qualified_name", "language"]
+            else:
+                whitelist = ["name", "qualified_name", "language", "access_modifier", 
+                            "is_abstract", "is_interface", "is_static", "return_type", 
+                            "signature", "type"]
+            
+            # Add safe properties from whitelist
+            for prop in whitelist:
+                if prop in properties and properties[prop] is not None:
+                    value = properties[prop]
+                    if isinstance(value, str):
+                        sanitized_value = value.replace("'", "''")
+                        safe_props[prop] = f"'{sanitized_value}'"
+                    elif isinstance(value, bool):
+                        safe_props[prop] = str(value).lower()  # 'true' or 'false'
+                    elif isinstance(value, (int, float)):
+                        safe_props[prop] = str(value)
+            
+            # Ensure qualified_name is not null (required for most lookups)
+            if "qualified_name" not in safe_props and primary_label != "File":
+                safe_props["qualified_name"] = f"'{primary_label}_{sanitized_id}'"
                 
-            # Try with MERGE
-            try:
-                sanitized_id = entity_id.replace("'", "''")
-                query = f"MERGE (:{primary_label} {{id: '{sanitized_id}'}})"
-                self.conn.execute(query)
-                self.logger.info(f"Merged {primary_label} node with ID {entity_id}")
-                return
-            except Exception as e:
-                self.logger.error(f"MERGE with ID failed for {primary_label}: {e}")
-                # Continue to next approach
+            # Ensure path for File nodes
+            if primary_label == "File" and "path" not in safe_props:
+                safe_props["path"] = f"'unknown_path_{sanitized_id}'"
             
-            # Try adding name if available
-            if "name" in properties and properties["name"]:
-                try:
-                    sanitized_id = entity_id.replace("'", "''")
-                    sanitized_name = str(properties["name"]).replace("'", "''")
-                    query = f"CREATE (:{primary_label} {{id: '{sanitized_id}', name: '{sanitized_name}'}})"
-                    self.conn.execute(query)
-                    self.logger.info(f"Created {primary_label} node with ID and name")
-                    return
-                except Exception as e:
-                    self.logger.error(f"CREATE with ID and name failed for {primary_label}: {e}")
-                    # We've tried everything reasonable
+            props_parts = [f"{key}: {value}" for key, value in safe_props.items()]
+            props_str = ", ".join(props_parts)
             
-            # Try one last time with CodeResource as fallback
-            if primary_label != "CodeResource":
-                try:
-                    sanitized_id = entity_id.replace("'", "''")
-                    query = f"CREATE (:CodeResource {{id: '{sanitized_id}'}})"
-                    self.conn.execute(query)
-                    self.logger.info(f"Created fallback CodeResource node with ID {entity_id}")
-                    return
-                except Exception as e:
-                    self.logger.error(f"CodeResource fallback failed: {e}")
+            # Create the node
+            query = f"CREATE (:{primary_label} {{{props_str}}});"
+            self.logger.debug(f"Executing query: {query}")
             
+            self.conn.execute(query)            
         except Exception as e:
             self.logger.error(f"Failed to save entity {entity_id}: {e}")
-            # Continue with the next entity - don't abort everything
-        
-        # Just continue instead of raising an exception
-        return
     
     def save_relationship(self, source_id: str, target_id: str, rel_type: str, properties: Dict[str, Any]) -> None:
         """Save a relationship to the database."""
@@ -419,21 +457,6 @@ class KuzuDBStorage(BaseGraphStorage):
             except Exception as e:
                 self.logger.error(f"Failed to match nodes and create relationship: {e}")
                 # Continue to next approach
-            
-            # Try creating a relationship with randomly generated IDs
-            # This is a last resort and won't connect to existing nodes
-            try:
-                dummy_id1 = str(uuid.uuid4())
-                dummy_id2 = str(uuid.uuid4())
-                
-                query = f"""
-                CREATE (a:{source_label} {{id: '{dummy_id1}'}})-[:{rel_type}]->(b:{target_label} {{id: '{dummy_id2}'}})
-                """
-                self.conn.execute(query)
-                self.logger.info(f"Created {rel_type} relationship with new random nodes (not connected to original nodes)")
-                return
-            except Exception as e:
-                self.logger.error(f"Failed final relationship creation attempt: {e}")
                 
         except Exception as e:
             self.logger.error(f"Failed to save relationship {rel_type} from {source_id} to {target_id}: {e}")
