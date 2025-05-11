@@ -3,351 +3,420 @@ description: Project document
 globs: 
 alwaysApply: false
 ---
-Project Document: Extensible Code Knowledge Graph
-1. Introduction
-1.1 Purpose
-This document outlines the schema, design, and implementation strategy for creating an extensible Code Knowledge Graph (CKG). The primary goal is to represent a codebase as a graph, capturing its structure, relationships, and dependencies. Initially, the focus will be on Java, but the design will be flexible enough to incorporate other programming languages such as Python, JavaScript, C++, and Go.
-1.2 Background
-Understanding complex codebases is a significant challenge in software development and maintenance. A CKG can provide valuable insights into code structure, dependencies, and potential impact of changes. By representing code entities (like modules, classes, functions) and their relationships (like calls, inheritance, dependencies) as a graph, we can perform powerful queries and analyses.
-1.3 Goals
-Define a core, language-agnostic schema for the CKG.
-Provide specific extensions for Java.
-Outline a strategy for extending the schema to other languages.
-Describe the data ingestion and population process.
-Identify potential use cases and analysis capabilities.
-1.4 Scope
-In Scope:
-Schema definition for core entities and relationships.
-Java-specific schema extensions.
-High-level design for extensibility to Python, JavaScript, C++, Go.
-Conceptual data ingestion pipeline using Tree-sitter based parsers and Memgraph.
-Out of Scope:
-Detailed algorithms for static/dynamic code analysis beyond AST traversal.
-Performance benchmarks of Memgraph against other graph databases.
-2. Core Knowledge Graph Schema (Language Agnostic)
-This core schema defines fundamental entities and relationships common across many programming languages.
-2.1 Core Entities
-These entities represent the basic building blocks of most codebases.
-CodeResource (Abstract)
-Description: A generic representation of a piece of code or a container of code. This serves as a base type for more specific entities.
-Attributes:
-name (String): The identifier of the code resource (e.g., function name, class name, file name).
-qualifiedName (String): A unique, fully qualified name for the resource within the codebase (e.g., com.example.MyClass.myMethod).
-documentation (String, Optional): Extracted comments or documentation associated with the resource.
-language (String, Enum, Optional): The primary programming language of this resource (e.g., "Java", "Python"). Useful when multiple languages are present.
-File (Inherits CodeResource)
-Description: Represents a physical file in the codebase.
-Attributes:
-path (String): The absolute or relative file path.
-size (Integer, Optional): Size of the file in bytes.
-lastModifiedDate (DateTime, Optional): Last modification timestamp.
-checksum (String, Optional): A checksum (e.g., MD5, SHA256) of the file content for change tracking.
-Namespace (or Module or Package) (Inherits CodeResource)
-Description: Represents a logical grouping of code, such as a module in Python, a package in Java, or a namespace in C++.
-Attributes:
-(Inherits name, qualifiedName, documentation from CodeResource)
-Structure (or TypeDefinition) (Inherits CodeResource)
-Description: Represents a user-defined type or data structure, such as a class, struct, interface, or enum.
-Attributes:
-(Inherits name, qualifiedName, documentation from CodeResource)
-accessModifier (String, Enum, Optional): Visibility level (e.g., public, private, protected, internal, fileprivate). Values depend on the language.
-isAbstract (Boolean, Optional): Indicates if the structure is abstract (if applicable to the language).
-isInterface (Boolean, Optional): Indicates if the structure defines an interface (if applicable).
-Callable (or FunctionUnit) (Inherits CodeResource)
-Description: Represents an executable unit of code, such as a function, method, constructor, or lambda expression.
-Attributes:
-(Inherits name, qualifiedName, documentation from CodeResource)
-returnType (String, Optional): The data type of the value returned by the callable. Could also reference another Structure node.
-accessModifier (String, Enum, Optional): Visibility level.
-isStatic (Boolean, Optional): Indicates if the callable is static (if applicable).
-isAbstract (Boolean, Optional): Indicates if the callable is abstract (if applicable).
-cyclomaticComplexity (Integer, Optional): A measure of the code's complexity.
-linesOfCode (Integer, Optional): Number of source lines of code (SLOC) within the callable.
-signature (String, Optional): A textual representation of the callable's signature (name + parameter types).
-Parameter (or Argument) (Inherits CodeResource)
-Description: Represents a parameter of a Callable.
-Attributes:
-(Inherits name, documentation from CodeResource)
-type (String): The data type of the parameter. Could also reference another Structure node.
-defaultValue (String, Optional): Default value if one is defined.
-position (Integer): The ordinal position of the parameter in the callable's signature.
-Variable (Inherits CodeResource)
-Description: Represents a variable declared within a Callable, Structure, or Namespace. This can include local variables, fields, global variables, etc.
-Attributes:
-(Inherits name, qualifiedName, documentation from CodeResource)
-type (String): The data type of the variable. Could also reference another Structure node.
-initialValue (String, Optional): Initial value if defined and simple enough to capture.
-isConstant (Boolean, Optional): Indicates if the variable is a constant.
-accessModifier (String, Enum, Optional): Visibility level (for fields/member variables).
-Annotation (or Decorator) (Inherits CodeResource)
-Description: Represents metadata attached to code elements (e.g., Java annotations, Python decorators).
-Attributes:
-(Inherits name, qualifiedName, documentation from CodeResource)
-parameters (Map<String, String>, Optional): Key-value pairs of annotation parameters.
-Comment
-Description: Represents a code comment not directly part of formal documentation.
-Attributes:
-text (String): The content of the comment.
-type (String, Enum): E.g., LINE, BLOCK, DOC.
-lineNumberStart (Integer): Starting line number.
-lineNumberEnd (Integer): Ending line number.
-2.2 Core Relationships
-These relationships define how the core entities interact.
-DEFINED_IN
-Description: Indicates that a code entity is defined within a specific file.
-From: Namespace, Structure, Callable, Variable, Annotation
-To: File
-Attributes:
-lineNumberStart (Integer, Optional): The line number where the definition begins.
-lineNumberEnd (Integer, Optional): The line number where the definition ends.
-columnNumberStart (Integer, Optional)
-columnNumberEnd (Integer, Optional)
-CONTAINS (or HAS_MEMBER)
-Description: Represents containment or membership.
-From / To (Examples):
-Namespace -> Namespace (nested namespaces/packages)
-Namespace -> Structure
-Namespace -> Callable (global functions)
-File -> Structure
-File -> Callable
-Structure -> Callable (methods)
-Structure -> Variable (fields/attributes)
-Structure -> Structure (inner/nested classes)
-Callable -> Variable (local variables)
-Callable -> Structure (local/anonymous classes)
-CALLS
-Description: Represents a function or method call.
-From: Callable
-To: Callable
-Attributes:
-lineNumber (Integer, Optional): Line number where the call occurs.
-isDynamicDispatch (Boolean, Optional): True if the call resolution might be dynamic (e.g., virtual method call).
-type (String, Enum, Optional): E.g., STATIC, VIRTUAL, INTERFACE, SUPER.
-HAS_PARAMETER
-Description: Links a Callable to its Parameters.
-From: Callable
-To: Parameter
-REFERENCES (or USES_TYPE)
-Description: Indicates that a code entity refers to or uses a type definition.
-From: Callable (e.g., return type, variable type), Parameter (type), Variable (type), Structure (e.g., field type, type of implemented interface)
-To: Structure
-Attributes:
-usageContext (String, Enum, Optional): E.g., RETURN_TYPE, PARAMETER_TYPE, VARIABLE_TYPE, FIELD_TYPE, CAST, INSTANCE_CREATION.
-ACCESSES
-Description: Represents access to a variable (read or write).
-From: Callable
-To: Variable
-Attributes:
-accessType (String, Enum): READ, WRITE, READ_WRITE.
-lineNumber (Integer, Optional): Line number where the access occurs.
-INHERITS_FROM (or EXTENDS)
-Description: Represents class inheritance.
-From: Structure (Subclass)
-To: Structure (Superclass)
-IMPLEMENTS
-Description: Represents a class implementing an interface.
-From: Structure (Class)
-To: Structure (Interface, where Structure.isInterface is true)
-IMPORTS (or USES_NAMESPACE or INCLUDES_FILE)
-Description: Represents a dependency where one code unit imports/includes/uses another, typically at the file or namespace level.
-From: File, Namespace
-To: File, Namespace, Structure (e.g. Java static import of a class member)
-Attributes:
-alias (String, Optional): If the imported entity is aliased.
-ANNOTATED_BY (or HAS_DECORATOR)
-Description: Links a code element to an Annotation or Decorator that applies to it.
-From: Structure, Callable, Parameter, Variable, Namespace, File
-To: Annotation
-THROWS (or RAISES_EXCEPTION)
-Description: Indicates a Callable may throw a specific type of exception.
-From: Callable
-To: Structure (Exception type)
-Attributes:
-isDeclared (Boolean): True if explicitly declared (e.g., Java throws clause).
-CREATES_INSTANCE
-Description: Represents the instantiation of an object.
-From: Callable
-To: Structure (The class being instantiated)
-Attributes:
-lineNumber (Integer, Optional): Line number of instantiation.
-ASSOCIATED_COMMENT
-Description: Links a code entity to a relevant Comment.
-From: CodeResource (any specific entity like Callable, Structure, etc.)
-To: Comment
-3. Language-Specific Extensions
-The core schema provides a foundation. We can extend it with entities and attributes specific to each language.
-3.1 Java Specifics
-Entities:
-Package (Specialization of Namespace)
-Description: Represents a Java package.
-(Inherits attributes from Namespace)
-Class (Specialization of Structure)
-Description: Represents a Java class.
-Attributes (in addition to Structure):
-isFinal (Boolean): If the class is final.
-isEnum (Boolean): If the class is an enum.
-isRecord (Boolean): If the class is a record (Java 14+).
-genericParameters (List, Optional): e.g., <T, E extends Number>.
-Interface (Specialization of Structure)
-Description: Represents a Java interface.
-Attributes (in addition to Structure):
-isFunctionalInterface (Boolean, Optional): If annotated with @FunctionalInterface.
-genericParameters (List, Optional).
-Method (Specialization of Callable)
-Description: Represents a Java method.
-Attributes (in addition to Callable):
-isSynchronized (Boolean): If the method is synchronized.
-isNative (Boolean): If the method is native.
-isDefault (Boolean): If it's a default method in an interface.
-genericParameters (List, Optional).
-varargsParameter (String, Optional): Name of the varargs parameter if present.
-Constructor (Specialization of Callable)
-Description: Represents a Java constructor.
-(Inherits attributes from Callable, returnType is implicitly the class type).
-Field (Specialization of Variable)
-Description: Represents a Java field (member variable).
-Attributes (in addition to Variable):
-isStatic (Boolean): If the field is static.
-isFinal (Boolean): If the field is final.
-isTransient (Boolean): If the field is transient.
-isVolatile (Boolean): If the field is volatile.
-EnumConstant (Specialization of Variable)
-Description: Represents a constant within a Java enum.
-(Inherits attributes from Variable, type is the enum itself).
-JavaAnnotation (Specialization of Annotation)
-Description: Represents a Java annotation.
-Attributes (in addition to Annotation):
-retentionPolicy (String, Enum, Optional): E.g., SOURCE, CLASS, RUNTIME.
-targetElements (List, Enum, Optional): E.g., TYPE, METHOD, FIELD.
-Relationships:
-OVERRIDES
-Description: A method in a subclass overrides a method in a superclass/interface.
-From: Method (Overriding method)
-To: Method (Overridden method)
-Note: This is more specific than a simple CALLS to super.method().
-TYPE_PARAMETER_BOUND
-Description: Relates a generic type parameter to its bounds.
-From: Structure or Callable (that defines the generic parameter)
-To: Structure (the bound type)
-Attributes:
-parameterName (String): e.g., "T".
-boundType (String, Enum): EXTENDS, SUPER.
-4. Extensibility to Other Languages
-The core schema is designed to be a superset of common concepts. Extending to other languages involves:
-Mapping: Map language constructs to core entities/relationships using Tree-sitter grammars.
-Specialization: Create specialized entities/relationships if a language construct has unique properties not covered by the core (similar to Java extensions).
-New Entities/Relationships: Add new ones if a language has entirely novel concepts.
-4.1 Python
-Module: Maps directly to Namespace.
-Class: Maps to Structure. Python's multiple inheritance can be represented by multiple INHERITS_FROM relationships.
-Function/Method: Maps to Callable.
-Decorator: Maps to Annotation. The ANNOTATED_BY relationship applies.
-Variable (global, instance, local): Maps to Variable.
-Parameter: Maps to Parameter. Python's *args and **kwargs would need special handling, perhaps as attributes on Parameter or Callable (e.g., acceptsArbitraryPositionalArgs: Boolean, acceptsArbitraryKeywordArgs: Boolean).
-import statements: Map to IMPORTS relationship.
-Type Hinting: type attributes on Parameter, Variable, Callable (return type) can store type hints.
-Properties: A Python property could be a Callable (getter/setter/deleter methods) grouped under a conceptual Variable node representing the property itself.
-4.2 JavaScript
-Module (ES6): Maps to Namespace.
-Class (ES6): Maps to Structure.
-Function/Method: Maps to Callable. Arrow functions, anonymous functions are all Callable.
-Variable (var, let, const): Maps to Variable. isConstant for const.
-Parameter: Maps to Parameter. Rest parameters (...args) similar to Python's *args.
-Prototypes: Prototypal inheritance can be modeled with a specific relationship like PROTOTYPE_OF or by adapting INHERITS_FROM if the semantics are close enough for the desired analysis.
-require/import: Maps to IMPORTS.
-Callbacks/Promises/Async-Await: CALLS relationships would capture direct invocations. Modeling the asynchronous flow itself (e.g., event loop, promise chains) is more complex and might require specialized relationships or attributes (e.g., isAsync on Callable, AWAITS relationship).
-4.3 C++
-Namespace: Maps directly to Namespace.
-Class/Struct/Union: Map to Structure.
-Function/Method: Maps to Callable.
-Variable (global, member, local, static): Maps to Variable.
-Parameter: Maps to Parameter.
-#include: Maps to IMPORTS (linking to File nodes).
-Templates: Generic programming (templates) would require attributes like genericParameters on Structure and Callable, similar to Java generics. Template specializations could be distinct nodes linked to the primary template.
-Pointers/References: The type attribute on Variable and Parameter should be ableto represent pointer/reference types (e.g., int*, MyClass&). A REFERENCES_MEMORY_AT relationship could model pointer dereferencing if needed for deeper analysis.
-Operator Overloading: Overloaded operators are essentially Callable nodes with special names.
-Friend Functions/Classes: May require a specific relationship like HAS_FRIEND.
-4.4 Go
-Package: Maps to Namespace.
-Struct: Maps to Structure.
-Interface: Maps to Structure with isInterface = true. Go's implicit interface implementation means an IMPLEMENTS relationship would be inferred rather than explicitly declared.
-Function/Method: Maps to Callable. Methods in Go are functions with a receiver argument. The receiver can be a special Parameter.
-Variable: Maps to Variable.
-Parameter: Maps to Parameter.
-import: Maps to IMPORTS.
-Goroutines/Channels: Modeling concurrency primitives like goroutines and channels would require new entities (e.g., Goroutine, Channel) and relationships (e.g., LAUNCHES_GOROUTINE, SENDS_TO_CHANNEL, RECEIVES_FROM_CHANNEL). This is a significant extension.
-5. Data Ingestion and Processing
-Populating the CKG involves several steps:
-Source Code Acquisition: Obtain the codebase (e.g., clone a Git repository).
-Parsing and AST Generation:
-Utilize Tree-sitter as the primary parsing technology. Python wrappers for Tree-sitter will be used to interface with existing Tree-sitter grammars for various languages (Java, Python, JavaScript, C++, Go, etc.).
-For each supported language, a specific Tree-sitter grammar will be employed to generate an Abstract Syntax Tree (AST) or Concrete Syntax Tree (CST) for each source file.
-The Python-based processing pipeline will then traverse these trees.
-Entity Extraction:
-Traverse the Tree-sitter generated syntax trees to identify and extract information for each entity defined in the schema (Classes, Methods, Variables, etc.).
-Populate attributes for each entity.
-Generate unique qualifiedNames.
-Relationship Identification:
-Static Analysis: Re-traverse syntax trees or use symbol tables and type resolution information (where feasible with Tree-sitter output) to identify relationships:
-DEFINED_IN, CONTAINS: Directly from syntax tree structure.
-CALLS: Identify function call expressions. Resolution will rely on naming conventions and import analysis initially, with potential for more advanced resolution techniques later.
-INHERITS_FROM, IMPLEMENTS: From class/interface declarations.
-HAS_PARAMETER, REFERENCES, ACCESSES, THROWS, CREATES_INSTANCE: From type information, variable usage, method signatures, new expressions as identifiable from the syntax tree.
-IMPORTS: From import/include statements.
-ANNOTATED_BY: From annotation/decorator usage.
-Dynamic Analysis (Optional but Recommended for Call Graphs):
-Instrument the code or use profiling tools to capture actual runtime calls, especially for dynamically dispatched calls or calls made via reflection. This can augment the statically derived CALLS relationships.
-Graph Population:
-The extracted entities and relationships will be loaded into Memgraph.
-Python scripts will format the data and use Memgraph's client libraries (e.g., GQLAlchemy or the memgraph Python driver) to execute Cypher queries for creating nodes and relationships.
-Ensure idempotency: Re-processing the same code should update the graph, not create duplicates. qualifiedName and file checksums can help.
-Linking and Resolution:
-Resolve cross-file and cross-module references. For example, if FileA.ClassA calls FileB.ClassB.methodX(), ensure the CALLS edge connects the correct nodes, even if FileB is processed separately. This often requires a multi-pass approach or a global symbol table during processing within the Python ingestion scripts.
-6. Querying and Analysis Use Cases
-The CKG enables various analyses:
-Code Navigation and Understanding:
-"Find all callers of method X." (Query CALLS relationships)
-"Show the inheritance hierarchy for class Y." (Query INHERITS_FROM relationships)
-"What fields does method M access?" (Query ACCESSES relationships)
-"Where is this variable/function defined?" (Query DEFINED_IN relationship)
-Dependency Analysis:
-"Which modules depend on module Z?" (Query IMPORTS or derived dependency relationships)
-"If I change class A, what other classes/methods might be affected?" (Pathfinding queries)
-Impact Analysis:
-"What is the blast radius of deprecating function F?"
-"Which tests might be affected by a change in ClassC?" (If test code is also part of the graph)
-Code Quality and Metrics:
-"Find functions with cyclomatic complexity > N."
-"Identify orphaned code (uncalled functions, unused variables)."
-"Calculate afferent/efferent couplings for modules/classes."
-Refactoring Support:
-"Identify candidates for a new interface based on common method signatures in unrelated classes."
-"Find all instantiations of a class to help with constructor changes."
-Security Analysis:
-"Trace data flow from a user input source (Callable marked as input source) to a sensitive sink (Callable performing DB query)." (Requires taint analysis, potentially adding TAINTS relationships).
-7. Tools and Technologies
-Parsers:
-Primary Parsing Engine: Tree-sitter.
-Implementation Language for Parsers: Python, utilizing Tree-sitter's Python bindings.
-Grammars: Leverage existing Tree-sitter grammars for Java, Python, JavaScript, C++, Go, and other target languages.
-Graph Database:
-Memgraph: An in-memory graph database platform. Queries will be written in Cypher. Data ingestion will be handled via its Python client libraries.
-Visualization:
-Memgraph Lab: Memgraph's integrated visual user interface for graph exploration and query development.
-Gephi, Cytoscape (for more advanced or custom visualizations if needed).
-Custom web-based visualizations using libraries like D3.js, Vis.js, potentially connecting to Memgraph via its API.
-Analysis Platforms:
-Custom analysis scripts will be written in Python, querying Memgraph.
-8. Data Storage and Model
-Property Graph Model: The schema aligns well with the property graph model, which is natively supported by Memgraph. Nodes and relationships can have arbitrary key-value properties.
-Node Labels: Use node labels to represent entity types (e.g., :Class, :Method). An entity can have multiple labels to represent its place in an inheritance hierarchy (e.g., a Java Method node could have labels :Method:Callable:CodeResource). This is standard practice in property graphs and fully supported by Memgraph.
-Relationship Types: Use relationship types as defined in the schema (e.g., :CALLS, :INHERITS_FROM). Memgraph uses these types for defining edges in Cypher.
-9. Future Considerations
-Versioning: How to represent changes to the codebase over time (e.g., linking nodes to Git commits). This could involve snapshotting or delta encoding within Memgraph.
-Build System Integration: Incorporating information from build files (e.g., Maven POMs, Gradle scripts) to understand library dependencies.
-Dynamic Analysis Integration: Deeper integration of runtime information for more accurate call graphs and performance data.
-Cross-Language Calls: Modeling calls between code written in different languages (e.g., JNI calls from Java to C++). This would require a robust qualifiedName scheme that can uniquely identify elements across language boundaries.
-Machine Learning Applications: Using graph embeddings or GNNs on the CKG (Memgraph can integrate with MAGE - Memgraph Advanced Graph Extensions) for tasks like vulnerability prediction, code similarity, automated refactoring suggestions.
-Performance with Large Codebases: Evaluating Memgraph's performance and memory footprint with very large codebases and optimizing data ingestion and query patterns.
-10. Conclusion
-Creating an extensible Code Knowledge Graph using Tree-sitter for parsing and Memgraph for storage is a complex but rewarding endeavor. By starting with a solid core schema and a clear strategy for language-specific extensions, we can build a powerful tool for understanding, analyzing, and improving software systems across various programming languages. The initial focus on Java will provide a concrete implementation, paving the way for broader language support.
+# Project Document: Java Code Knowledge Graph (KùzuDB Edition)
+
+**Version:** 2.1
+**Date:** May 11, 2025
+
+## 1. Introduction
+
+### 1.1 Purpose
+This document outlines the schema, design, and implementation strategy for creating a Code Knowledge Graph (CKG) for Java codebases. The primary goal is to represent a Java codebase as a graph, capturing its structure, relationships, and dependencies. All entities will be fully denormalized, storing all their respective data, including code bodies and comments. The system will use KùzuDB as its graph database.
+
+### 1.2 Background
+Understanding complex Java codebases is a significant challenge in software development and maintenance. A CKG can provide valuable insights into code structure, dependencies, and potential impact of changes. By representing Java code entities (like files, packages, classes, methods) and their relationships (like calls, inheritance, dependencies) as a graph, we can perform powerful queries and analyses.
+
+### 1.3 Goals
+* Define a denormalized, Java-specific schema for entities and relationships for KùzuDB.
+* Ensure each entity stores its complete relevant data, including source code snippets (bodies) and comments.
+* Describe the data ingestion and population process for Java code targeting KùzuDB.
+* Identify potential use cases and analysis capabilities for Java codebases.
+
+### 1.4 Scope
+
+#### In Scope:
+* KùzuDB Node and Relationship table schema definitions for Java.
+* Inclusion of full source text for relevant Java entities (file content, method/class bodies, comment text).
+* Conceptual data ingestion pipeline using the `tree-sitter-java` parser and KùzuDB.
+
+#### Out of Scope:
+* Detailed algorithms for static/dynamic code analysis beyond AST traversal.
+* Performance benchmarks of KùzuDB against other graph databases.
+* Schema definitions or support for languages other than Java.
+
+## 2. KùzuDB Schema for Java
+
+This schema defines the Node tables and Relationship tables for representing Java codebases in KùzuDB. All attributes are explicitly defined for each table.
+
+### 2.1 Java Node Table Definitions
+
+#### `FileNode` Table
+* **Description:** Represents a physical Java file in the codebase.
+* **Properties:**
+    * `path` (STRING, PRIMARY KEY): The absolute or relative file path.
+    * `name` (STRING): The file name (e.g., "MyClass.java").
+    * `qualifiedName` (STRING): A unique name, often the same as `path`.
+    * `language` (STRING): "Java".
+    * `documentation` (STRING, Optional): File-level comments if any.
+    * `size` (INT64, Optional): Size of the file in bytes.
+    * `lastModifiedDate` (DATETIME, Optional): Last modification timestamp.
+    * `checksum` (STRING, Optional): A checksum (e.g., MD5, SHA256) of the file content for change tracking.
+    * `content` (STRING): The full raw text content of the file.
+
+#### `PackageNode` Table
+* **Description:** Represents a Java package.
+* **Properties:**
+    * `qualifiedName` (STRING, PRIMARY KEY): The fully qualified package name (e.g., "com.example.util").
+    * `name` (STRING): The simple package name (e.g., "util").
+    * `documentation` (STRING, Optional): Extracted Javadoc from `package-info.java`.
+    * `language` (STRING): "Java".
+
+#### `ClassNode` Table
+* **Description:** Represents a Java class (including enums and records).
+* **Properties:**
+    * `qualifiedName` (STRING, PRIMARY KEY): The fully qualified class name (e.g., "com.example.MyClass").
+    * `name` (STRING): The simple class name (e.g., "MyClass").
+    * `documentation` (STRING, Optional): Extracted Javadoc for the class.
+    * `language` (STRING): "Java".
+    * `accessModifier` (STRING, Optional): Visibility level (e.g., "public", "private", "protected", "package-private").
+    * `isAbstract` (BOOL, Optional): True if the class is abstract.
+    * `isFinal` (BOOL, Optional): True if the class is final.
+    * `isEnum` (BOOL, Optional): True if the class is an enum.
+    * `isRecord` (BOOL, Optional): True if the class is a record (Java 14+).
+    * `genericParameters` (LIST(STRING), Optional): e.g., `["T", "E extends Number"]`.
+    * `body` (STRING, Optional): The full source code of the class definition (from opening brace to closing brace, including inner members).
+
+#### `InterfaceNode` Table
+* **Description:** Represents a Java interface.
+* **Properties:**
+    * `qualifiedName` (STRING, PRIMARY KEY): The fully qualified interface name (e.g., "com.example.MyInterface").
+    * `name` (STRING): The simple interface name (e.g., "MyInterface").
+    * `documentation` (STRING, Optional): Extracted Javadoc for the interface.
+    * `language` (STRING): "Java".
+    * `accessModifier` (STRING, Optional): Typically "public" or "package-private".
+    * `isFunctionalInterface` (BOOL, Optional): True if annotated with `@FunctionalInterface`.
+    * `genericParameters` (LIST(STRING), Optional): e.g., `["T"]`.
+    * `body` (STRING, Optional): The full source code of the interface definition.
+
+#### `MethodNode` Table
+* **Description:** Represents a Java method.
+* **Properties:**
+    * `qualifiedName` (STRING, PRIMARY KEY): Unique name, e.g., "com.example.MyClass.myMethod(int,java.lang.String)".
+    * `name` (STRING): The method name (e.g., "myMethod").
+    * `documentation` (STRING, Optional): Extracted Javadoc for the method.
+    * `language` (STRING): "Java".
+    * `returnType` (STRING, Optional): The fully qualified data type of the value returned.
+    * `accessModifier` (STRING, Optional): Visibility level.
+    * `isStatic` (BOOL, Optional): True if the method is static.
+    * `isAbstract` (BOOL, Optional): True if the method is abstract.
+    * `isFinal` (BOOL, Optional): True if the method is final.
+    * `isSynchronized` (BOOL, Optional): True if the method is synchronized.
+    * `isNative` (BOOL, Optional): True if the method is native.
+    * `isDefault` (BOOL, Optional): True if it's a default method in an interface.
+    * `cyclomaticComplexity` (INT64, Optional): A measure of the code's complexity.
+    * `linesOfCode` (INT64, Optional): Number of source lines of code (SLOC) within the method body.
+    * `signature` (STRING, Optional): A textual representation of the method's signature (name + parameter types).
+    * `genericParameters` (LIST(STRING), Optional): e.g., `["<T> void myGenericMethod(T arg)"]`.
+    * `varargsParameterName` (STRING, Optional): Name of the varargs parameter if present.
+    * `body` (STRING, Optional): The full source code of the method body (from opening brace to closing brace).
+
+#### `ConstructorNode` Table
+* **Description:** Represents a Java constructor.
+* **Properties:**
+    * `qualifiedName` (STRING, PRIMARY KEY): Unique name, e.g., "com.example.MyClass.<init>(int,java.lang.String)".
+    * `name` (STRING): The class name (constructors are named after the class, or `<init>`).
+    * `documentation` (STRING, Optional): Extracted Javadoc for the constructor.
+    * `language` (STRING): "Java".
+    * `accessModifier` (STRING, Optional): Visibility level.
+    * `cyclomaticComplexity` (INT64, Optional): A measure of the code's complexity.
+    * `linesOfCode` (INT64, Optional): Number of source lines of code (SLOC) within the constructor body.
+    * `signature` (STRING, Optional): A textual representation of the constructor's signature.
+    * `genericParameters` (LIST(STRING), Optional).
+    * `varargsParameterName` (STRING, Optional): Name of the varargs parameter if present.
+    * `body` (STRING, Optional): The full source code of the constructor body.
+
+#### `FieldNode` Table
+* **Description:** Represents a Java field (member variable).
+* **Properties:**
+    * `qualifiedName` (STRING, PRIMARY KEY): Unique name, e.g., "com.example.MyClass.myField".
+    * `name` (STRING): The field name (e.g., "myField").
+    * `documentation` (STRING, Optional): Extracted Javadoc for the field.
+    * `language` (STRING): "Java".
+    * `type` (STRING): The fully qualified data type of the field.
+    * `initialValue` (STRING, Optional): Initial value if defined and simple enough to capture.
+    * `accessModifier` (STRING, Optional): Visibility level.
+    * `isStatic` (BOOL, Optional): True if the field is static.
+    * `isFinal` (BOOL, Optional): True if the field is final.
+    * `isTransient` (BOOL, Optional): True if the field is transient.
+    * `isVolatile` (BOOL, Optional): True if the field is volatile.
+
+#### `ParameterNode` Table
+* **Description:** Represents a parameter of a method or constructor.
+* **Properties:**
+    * `qualifiedName` (STRING, PRIMARY KEY): Unique name, e.g., "com.example.MyClass.myMethod(int,java.lang.String)#paramName_0".
+    * `name` (STRING): The parameter name.
+    * `documentation` (STRING, Optional): From Javadoc `@param` tag.
+    * `language` (STRING): "Java".
+    * `type` (STRING): The fully qualified data type of the parameter.
+    * `position` (INT64): The ordinal position of the parameter (0-indexed).
+    * `isFinal` (BOOL, Optional): True if the parameter is declared final.
+    * `isVarargs` (BOOL, Optional): True if this is a varargs parameter.
+
+#### `EnumConstantNode` Table
+* **Description:** Represents a constant within a Java enum.
+* **Properties:**
+    * `qualifiedName` (STRING, PRIMARY KEY): Unique name, e.g., "com.example.MyEnum.CONSTANT_A".
+    * `name` (STRING): The enum constant name (e.g., "CONSTANT_A").
+    * `documentation` (STRING, Optional): Extracted Javadoc for the enum constant.
+    * `language` (STRING): "Java".
+    * `type` (STRING): The qualified name of the enum class itself.
+    * `constructorArguments` (LIST(STRING), Optional): Arguments passed to the enum constant's constructor, if any.
+    * `body` (STRING, Optional): If the enum constant has a specific class body.
+
+#### `JavaAnnotationNode` Table
+* **Description:** Represents the *definition* of a Java annotation type.
+* **Properties:**
+    * `qualifiedName` (STRING, PRIMARY KEY): The fully qualified name of the annotation type (e.g., "java.lang.Override").
+    * `name` (STRING): The simple name of the annotation type (e.g., "Override").
+    * `documentation` (STRING, Optional): Extracted Javadoc for the annotation type.
+    * `language` (STRING): "Java".
+    * `retentionPolicy` (STRING, Optional): E.g., "SOURCE", "CLASS", "RUNTIME".
+    * `targetElements` (LIST(STRING), Optional): E.g., ["TYPE", "METHOD", "FIELD"].
+    * `body` (STRING, Optional): The full source code of the annotation type definition.
+
+#### `CommentNode` Table
+* **Description:** Represents a code comment not part of formal Javadoc for a specific element.
+* **Properties:**
+    * `id` (STRING, PRIMARY KEY): A unique ID, e.g., `filePath#lineNumberStart_lineNumberEnd`.
+    * `text` (STRING): The content of the comment.
+    * `commentType` (STRING): E.g., "LINE", "BLOCK", "JAVADOC_BLOCK" (if not tied to an element's doc).
+    * `lineNumberStart` (INT64): Starting line number in its file.
+    * `lineNumberEnd` (INT64): Ending line number in its file.
+    * `filePath` (STRING): Path of the file containing the comment.
+
+### 2.2 Java Relationship Table Definitions
+
+#### `DEFINED_IN_FILE` RelTable
+* **Description:** Indicates that a top-level Java entity is defined within a specific file.
+* **Connections:**
+    * `FROM PackageNode TO FileNode` (for package-info.java)
+    * `FROM ClassNode TO FileNode`
+    * `FROM InterfaceNode TO FileNode`
+    * `FROM JavaAnnotationNode TO FileNode` (for annotation type definitions)
+* **Properties:**
+    * `lineNumberStart` (INT64, Optional)
+    * `lineNumberEnd` (INT64, Optional)
+    * `columnNumberStart` (INT64, Optional)
+    * `columnNumberEnd` (INT64, Optional)
+
+#### `CONTAINS_MEMBER` RelTable
+* **Description:** Represents containment or membership.
+* **Connections:**
+    * `FROM PackageNode TO ClassNode`
+    * `FROM PackageNode TO InterfaceNode`
+    * `FROM ClassNode TO MethodNode`
+    * `FROM ClassNode TO ConstructorNode`
+    * `FROM ClassNode TO FieldNode`
+    * `FROM ClassNode TO ClassNode` (Inner/Nested Class)
+    * `FROM ClassNode TO InterfaceNode` (Inner/Nested Interface)
+    * `FROM ClassNode TO EnumConstantNode` (For Enums)
+    * `FROM InterfaceNode TO MethodNode` (Abstract, static, or default methods)
+    * `FROM InterfaceNode TO FieldNode` (Constants)
+    * `FROM InterfaceNode TO ClassNode` (Nested Class in Interface)
+    * `FROM InterfaceNode TO InterfaceNode` (Nested Interface in Interface)
+    * `FROM MethodNode TO ClassNode` (Local/Anonymous Class)
+    * `FROM ConstructorNode TO ClassNode` (Local/Anonymous Class in constructor)
+* **Properties:** (None, or positional info if relevant for ordering members)
+
+#### `CALLS` RelTable
+* **Description:** Represents a method or constructor call.
+* **Connections:**
+    * `FROM MethodNode TO MethodNode`
+    * `FROM MethodNode TO ConstructorNode`
+    * `FROM ConstructorNode TO MethodNode`
+    * `FROM ConstructorNode TO ConstructorNode` (e.g., `this()`, `super()`)
+* **Properties:**
+    * `lineNumber` (INT64, Optional): Line number where the call occurs in the caller's body.
+    * `isDynamicDispatch` (BOOL, Optional): True if the call resolution might be dynamic.
+    * `callType` (STRING, Optional): E.g., "STATIC", "VIRTUAL", "INTERFACE", "SUPER", "THIS_CONSTRUCTOR".
+
+#### `HAS_PARAMETER` RelTable
+* **Description:** Links a callable to its parameters.
+* **Connections:**
+    * `FROM MethodNode TO ParameterNode`
+    * `FROM ConstructorNode TO ParameterNode`
+* **Properties:** (None beyond the implicit ordering by `ParameterNode.position`)
+
+#### `REFERENCES_TYPE` RelTable
+* **Description:** Indicates a code element refers to a type (Class or Interface).
+* **Connections:**
+    * `FROM MethodNode TO ClassNode` (e.g., return type, local var type, cast)
+    * `FROM MethodNode TO InterfaceNode` (e.g., return type, local var type, cast)
+    * `FROM ConstructorNode TO ClassNode` (e.g., local var type, cast)
+    * `FROM ConstructorNode TO InterfaceNode` (e.g., local var type, cast)
+    * `FROM ParameterNode TO ClassNode` (parameter type)
+    * `FROM ParameterNode TO InterfaceNode` (parameter type)
+    * `FROM FieldNode TO ClassNode` (field type)
+    * `FROM FieldNode TO InterfaceNode` (field type)
+* **Properties:**
+    * `usageContext` (STRING, Optional): E.g., "RETURN_TYPE", "PARAMETER_TYPE", "FIELD_TYPE", "LOCAL_VARIABLE_TYPE", "CAST", "INSTANCE_CREATION_TYPE", "TYPE_ARGUMENT".
+    * `lineNumber` (INT64, Optional): Line where reference occurs.
+
+#### `ACCESSES_FIELD` RelTable
+* **Description:** Represents access to a field.
+* **Connections:**
+    * `FROM MethodNode TO FieldNode`
+    * `FROM ConstructorNode TO FieldNode`
+* **Properties:**
+    * `accessType` (STRING): "READ", "WRITE", "READ_WRITE".
+    * `lineNumber` (INT64, Optional): Line number where the access occurs.
+
+#### `EXTENDS_CLASS` RelTable
+* **Description:** Represents class inheritance.
+* **Connections:**
+    * `FROM ClassNode TO ClassNode` (Subclass to Superclass)
+
+#### `IMPLEMENTS_INTERFACE` RelTable
+* **Description:** A class implementing an interface, or an interface extending another.
+* **Connections:**
+    * `FROM ClassNode TO InterfaceNode`
+    * `FROM InterfaceNode TO InterfaceNode` (Interface extension)
+
+#### `IMPORTS` RelTable
+* **Description:** Represents an import statement.
+* **Connections:**
+    * `FROM FileNode TO PackageNode` (e.g., `import com.example.*;`)
+    * `FROM FileNode TO ClassNode` (e.g., `import com.example.MyClass;`)
+    * `FROM FileNode TO InterfaceNode` (e.g., `import com.example.MyInterface;`)
+    * `FROM FileNode TO MethodNode` (Static method import)
+    * `FROM FileNode TO FieldNode` (Static field import)
+* **Properties:**
+    * `alias` (STRING, Optional): If the imported entity is aliased.
+    * `isStatic` (BOOL): True for static imports.
+    * `isOnDemand` (BOOL): True for wildcard imports (e.g., `import java.util.*;`).
+    * `lineNumber` (INT64, Optional): Line number of import statement.
+
+#### `ANNOTATED_BY` RelTable
+* **Description:** Links a code element to an instance of an annotation usage. The `TO` node is the definition of the annotation type.
+* **Connections:**
+    * `FROM PackageNode TO JavaAnnotationNode`
+    * `FROM ClassNode TO JavaAnnotationNode`
+    * `FROM InterfaceNode TO JavaAnnotationNode`
+    * `FROM MethodNode TO JavaAnnotationNode`
+    * `FROM ConstructorNode TO JavaAnnotationNode`
+    * `FROM FieldNode TO JavaAnnotationNode`
+    * `FROM ParameterNode TO JavaAnnotationNode`
+* **Properties:**
+    * `annotationValues` (MAP(STRING, STRING), Optional): Key-value pairs of explicitly set annotation parameters and their string representations (e.g., `{"value": "\"Sample\"", "count": "1"}`).
+    * `annotationSourceText` (STRING): The literal text of the annotation usage (e.g., `@Override`, `@SuppressWarnings("unchecked")`).
+    * `lineNumber` (INT64, Optional): Line number of annotation.
+
+#### `THROWS_EXCEPTION` RelTable
+* **Description:** Indicates a callable may throw a specific type of exception.
+* **Connections:**
+    * `FROM MethodNode TO ClassNode` (Exception type is a Class)
+    * `FROM ConstructorNode TO ClassNode`
+* **Properties:**
+    * `isDeclared` (BOOL): True if explicitly declared in a `throws` clause.
+    * `lineNumber` (INT64, Optional): Line number of the `throw` statement if not declared.
+
+#### `CREATES_INSTANCE` RelTable
+* **Description:** Represents the instantiation of an object (`new` keyword).
+* **Connections:**
+    * `FROM MethodNode TO ClassNode` (The class being instantiated)
+    * `FROM ConstructorNode TO ClassNode`
+* **Properties:**
+    * `lineNumber` (INT64, Optional): Line number of instantiation.
+
+#### `ASSOCIATED_COMMENT` RelTable
+* **Description:** Links a code entity to a relevant general CommentNode (not its primary Javadoc).
+* **Connections:**
+    * `FROM FileNode TO CommentNode`
+    * `FROM PackageNode TO CommentNode`
+    * `FROM ClassNode TO CommentNode`
+    * `FROM InterfaceNode TO CommentNode`
+    * `FROM MethodNode TO CommentNode`
+    * `FROM ConstructorNode TO CommentNode`
+    * `FROM FieldNode TO CommentNode`
+    * `FROM ParameterNode TO CommentNode`
+    * `FROM EnumConstantNode TO CommentNode`
+    * `FROM JavaAnnotationNode TO CommentNode`
+* **Properties:** (None, or `commentProximityType` like "PRECEDING", "TRAILING_SAME_LINE", "INTERNAL")
+
+#### `OVERRIDES_METHOD` RelTable
+* **Description:** A method in a subclass overrides a method in a superclass/interface.
+* **Connections:**
+    * `FROM MethodNode TO MethodNode` (Overriding method to Overridden method)
+
+#### `TYPE_PARAMETER_BOUND` RelTable
+* **Description:** Relates a generic type parameter to its bounds.
+* **Connections:**
+    * `FROM ClassNode TO ClassNode` (Generic class's param `T` bound by another Class)
+    * `FROM ClassNode TO InterfaceNode` (Generic class's param `T` bound by an Interface)
+    * `FROM InterfaceNode TO ClassNode`
+    * `FROM InterfaceNode TO InterfaceNode`
+    * `FROM MethodNode TO ClassNode`
+    * `FROM MethodNode TO InterfaceNode`
+* **Properties:**
+    * `parameterName` (STRING): e.g., "T".
+    * `boundType` (STRING): "EXTENDS", "SUPER".
+
+## 3. Data Ingestion and Processing for Java
+
+Populating the CKG for Java codebases involves these steps:
+1.  **Source Code Acquisition:** Obtain the Java codebase.
+2.  **Parsing and AST Generation:**
+    * Utilize the `tree-sitter-java` parser via its Python bindings.
+    * A Python-based processing pipeline will traverse the AST for each Java source file.
+3.  **Entity Extraction & Denormalization:**
+    * Traverse ASTs to identify and extract information for each Java-specific Node table defined in the KùzuDB schema.
+    * Populate all attributes for each entity directly, including `name`, `qualifiedName`, `language` (set to "Java"), `documentation` (extracted Javadoc and other comments), and `body`/`content` (verbatim source text for methods, classes, files, etc.).
+    * Generate unique `qualifiedName`s to serve as primary keys. For comments, generate unique `id`s.
+4.  **Relationship Identification (Static Analysis):**
+    * Re-traverse ASTs or use symbol tables (built during traversal) to identify relationships.
+    * Examples: `DEFINED_IN_FILE`, `CONTAINS_MEMBER`, `CALLS`, `EXTENDS_CLASS`, `IMPLEMENTS_INTERFACE`, `IMPORTS`, `ANNOTATED_BY`, etc., mapping to the specific KùzuDB Rel tables for Java.
+5.  **Graph Population (KùzuDB):**
+    * The extracted entities (as rows for Node tables) and relationships (as rows for Rel tables) will be loaded into KùzuDB.
+    * Python scripts will use KùzuDB's Python client (`kuzu`) to execute `CREATE NODE TABLE`, `CREATE REL TABLE`, and then `CREATE` or `MERGE` (if supported for idempotency, otherwise handle via application logic) Cypher-like queries to insert data.
+    * Ensure idempotency: Re-processing the same code should update the graph, not create duplicates. Use primary keys (`qualifiedName`, `path`, `id`) for this. File checksums can help decide if a file needs re-parsing.
+6.  **Linking and Resolution:**
+    * Resolve cross-file references within the Java codebase. This typically requires a multi-pass approach or a global symbol table aggregated during processing before KùzuDB insertion.
+
+## 4. Querying and Analysis Use Cases for Java (Using KùzuDB Cypher)
+
+* **Code Navigation:**
+    * `MATCH (caller)-[:CALLS]->(callee:MethodNode {name: 'targetMethod'}) RETURN caller.qualifiedName;`
+    * `MATCH (c:ClassNode)-[:EXTENDS_CLASS*]->(s:ClassNode) WHERE c.name = 'MyDerivedClass' RETURN s.qualifiedName;`
+* **Dependency Analysis:**
+    * `MATCH (f:FileNode)-[:IMPORTS]->(p:PackageNode {name: 'com.example.dep'}) RETURN f.path;`
+* **Impact Analysis:**
+    * "If I change `ClassA`, what methods in other classes might be affected?" (Pathfinding queries involving `CALLS`, `REFERENCES_TYPE`, etc.)
+* **Code Quality & Metrics:**
+    * `MATCH (m:MethodNode) WHERE m.cyclomaticComplexity > 15 RETURN m.qualifiedName, m.cyclomaticComplexity;`
+* **Content-based Search:**
+    * `MATCH (m:MethodNode) WHERE m.body CONTAINS 'some specific logic' RETURN m.qualifiedName;`
+    * `MATCH (cm:CommentNode) WHERE cm.text CONTAINS 'TODO:' RETURN cm.filePath, cm.lineNumberStart, cm.text;`
+
+## 5. Tools and Technologies
+
+* **Parsers:**
+    * Primary Parsing Engine: Tree-sitter.
+    * Implementation Language for Parsers: Python, utilizing Tree-sitter's Python bindings.
+    * Java Grammar: `tree-sitter-java`.
+* **Graph Database:**
+    * KùzuDB: An embeddable, in-process property graph database management system. Queries will be written in KùzuDB's Cypher dialect. Data ingestion via its Python client.
+* **Visualization:**
+    * KùzuExplorer (if available/suitable).
+    * Export data from KùzuDB (e.g., to CSV/Parquet) and use tools like Gephi, Cytoscape.
+    * Custom web-based visualizations connecting to a Python backend that queries KùzuDB.
+* **Analysis Platforms:**
+    * Custom analysis scripts in Python, querying KùzuDB.
+
+## 6. Data Storage and Model (KùzuDB)
+
+* **Relational Property Graph Model:** KùzuDB employs a relational property graph model.
+    * **Node Tables:** Entities (File, Class, Method, etc.) are stored in Node tables. Each Node table has a defined schema with named properties and data types. Each Node table must have a PRIMARY KEY.
+    * **Rel Tables (Relationship Tables):** Relationships (CALLS, EXTENDS_CLASS, etc.) are stored in Rel tables. Each Rel table connects a `FROM` Node table to a `TO` Node table and can have its own properties. Rels are directed.
+* **Schema Definition:** The schema (Node tables, Rel tables, their properties, and primary keys) is explicitly defined upfront using KùzuDB's DDL commands (e.g., `CREATE NODE TABLE ...`, `CREATE REL TABLE ...`).
+* **Data Types:** KùzuDB supports standard data types like `STRING`, `INT64`, `BOOL`, `DOUBLE`, `DATETIME`, `LIST`, `MAP` etc., which will be used for entity properties.
+
+## 7. Future Considerations
+
+* **Versioning:** Store CKG snapshots for different Java code versions, perhaps by prefixing table names or adding a `version` property and filtering.
+* **Build System Integration:** Parse Java build files (Maven POMs, Gradle scripts) to understand library dependencies.
+* **Dynamic Analysis Integration:** Augment statically derived relationships (especially `CALLS`) with runtime information for more accurate call graphs in Java.
+* **Performance with Large Codebases:** Evaluate KùzuDB's performance for ingestion and querying on very large Java projects.
+
+## 8. Conclusion
+
+Creating a Code Knowledge Graph focused on Java, with denormalized entities in KùzuDB and using Tree-sitter for parsing, is a powerful approach. Storing full code bodies and comments directly within nodes enhances analytical capabilities for Java software systems. This focused implementation will provide deep insights into the structure and dependencies of Java applications.
